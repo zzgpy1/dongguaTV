@@ -1195,6 +1195,14 @@
             overflow-x: auto;
             padding-bottom: 20px;
             scroll-behavior: smooth;
+            /* 添加滚动捕捉，让滚动更自然 */
+            scroll-snap-type: x proximity;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .hot-row>.hot-card,
+        .hot-row>.history-card {
+            scroll-snap-align: start;
         }
 
         .hot-row::-webkit-scrollbar {
@@ -1258,6 +1266,98 @@
         .hot-card:hover {
             transform: scale(1.08);
             z-index: 10;
+        }
+
+        /* 历史卡片 - 不随 hover 缩放，只有内容缩放 */
+        .history-card {
+            min-width: 150px;
+            width: 150px;
+            cursor: pointer;
+            position: relative;
+            padding: 3px;
+        }
+
+        .history-card .poster-wrap {
+            transition: transform 0.3s;
+        }
+
+        .history-card:hover .poster-wrap {
+            transform: scale(1.05);
+        }
+
+        /* 删除按钮固定在卡片右上角 */
+        .history-delete-btn {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            z-index: 20;
+            width: 22px;
+            height: 22px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.2s, background 0.2s;
+        }
+
+        .history-delete-btn i {
+            color: #fff;
+            font-size: 10px;
+        }
+
+        .history-card:hover .history-delete-btn {
+            opacity: 1;
+        }
+
+        .history-delete-btn:hover {
+            background: rgba(229, 9, 20, 0.9) !important;
+        }
+
+        /* 移动端：始终显示删除按钮 */
+        @media (max-width: 768px),
+        (hover: none) {
+            .history-delete-btn {
+                opacity: 0.8 !important;
+            }
+        }
+
+        /* 播放图标覆盖层 */
+        .play-icon-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 40px;
+            height: 40px;
+            background: rgba(229, 9, 20, 0.9);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .play-icon-overlay i {
+            color: #fff;
+            font-size: 14px;
+            margin-left: 3px;
+        }
+
+        .history-card:hover .play-icon-overlay {
+            opacity: 1;
+        }
+
+        /* 悬停时显示删除按钮和播放图标 (hot-card 兼容) */
+        .hot-card:hover .history-delete-btn {
+            opacity: 1 !important;
+        }
+
+        .hot-card:hover .play-icon-overlay {
+            opacity: 1 !important;
         }
 
         .poster-wrap {
@@ -2166,6 +2266,58 @@
         </div>
 
         <div v-if="!searched">
+            <!-- 🕐 观看历史 (最上方) -->
+            <div class="section-container animate__animated animate__fadeInUp" v-if="watchHistory.length > 0"
+                style="margin-top: 60px; margin-bottom: 10px;">
+                <div class="section-header" style="display: flex; align-items: center;">
+                    <div class="section-line" style="background: linear-gradient(135deg, #667eea, #764ba2);"></div>
+                    <div class="section-title"><i class="fas fa-history"></i> 继续观看</div>
+                    <span class="expand-toggle" @click="clearWatchHistory"
+                        style="margin-left: auto; color: #888; font-size: 12px;">
+                        <i class="fas fa-trash-alt"></i> 清除全部
+                    </span>
+                </div>
+
+                <!-- 横向滚动 -->
+                <div class="scroll-container">
+                    <button class="scroll-btn left" v-show="historyCanScrollLeft" @click="scrollHistoryRow(-1)"><i
+                            class="fas fa-chevron-left"></i></button>
+                    <div class="hot-row" ref="watchHistoryRow" @scroll="onHistoryScroll">
+                        <div class="history-card" v-for="(item, index) in watchHistory" :key="item.name + index">
+                            <!-- 删除按钮 (放在 card 外层避免随缩放移动) -->
+                            <div class="history-delete-btn" @click.stop="removeFromHistory(index)">
+                                <i class="fas fa-times"></i>
+                            </div>
+                            <div class="poster-wrap" @click="playFromHistory(item)">
+                                <img :src="item.poster" :alt="item.name"
+                                    @error="$event.target.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27150%27 height=%27225%27%3E%3Crect fill=%27%23333%27 width=%27150%27 height=%27225%27/%3E%3C/svg%3E'"
+                                    loading="lazy">
+                                <!-- 进度条 -->
+                                <div
+                                    style="position: absolute; bottom: 0; left: 0; right: 0; height: 4px; background: rgba(0,0,0,0.5);">
+                                    <div
+                                        :style="{ width: item.progress + '%', height: '100%', background: 'linear-gradient(90deg, #e50914, #ff4757)' }">
+                                    </div>
+                                </div>
+                                <!-- 集数标签 -->
+                                <div v-if="item.episode"
+                                    style="position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,0.8); color: #fff; font-size: 10px; padding: 2px 6px; border-radius: 4px;">
+                                    {{ item.episode }}
+                                </div>
+                                <!-- 播放图标 -->
+                                <div class="play-icon-overlay">
+                                    <i class="fas fa-play"></i>
+                                </div>
+                            </div>
+                            <div class="movie-name" @click="playFromHistory(item)">{{ item.name }}</div>
+                            <div class="movie-date" style="font-size: 11px;">{{ formatWatchTime(item.watchedAt) }}</div>
+                        </div>
+                    </div>
+                    <button class="scroll-btn right" v-show="historyCanScrollRight" @click="scrollHistoryRow(1)"><i
+                            class="fas fa-chevron-right"></i></button>
+                </div>
+            </div>
+
             <!-- 分类导航栏 -->
             <div class="category-nav-container animate__animated animate__fadeInUp" style="margin-bottom: 40px;">
                 <div class="category-item" v-for="item in categories" :key="item.name" @click="handleCatClick(item)">
@@ -2196,9 +2348,9 @@
                 <template v-if="rowLists[key] && rowLists[key].length > 0">
                     <!-- 收起状态：横向滚动 -->
                     <div class="scroll-container" v-show="!expandedRows[key]">
-                        <button class="scroll-btn left" @click="scrollRow(key, -1)"><i
+                        <button class="scroll-btn left" @click="scrollRow(key, -1)" v-show="rowLeftButtons[key]"><i
                                 class="fas fa-chevron-left"></i></button>
-                        <div class="hot-row" :ref="key">
+                        <div class="hot-row" :ref="key" @scroll="onRowScroll(key)">
                             <div class="hot-card" v-for="item in rowLists[key]" :key="item.id"
                                 @click="autoSearch(item.title || item.name)">
                                 <div class="poster-wrap">
@@ -2698,6 +2850,11 @@
                     playbackErrorCount: 0,  // 播放失败计数
                     isAutoRetrying: false,  // 是否正在自动重试
                     autoRetryMessage: '',  // 自动切换提示信息
+                    watchHistory: [],  // 用户观看历史记录
+                    historyExpanded: false,  // 观看历史展开状态
+                    historyCanScrollLeft: false,  // 可以向左滚动
+                    historyCanScrollRight: false,  // 可以向右滚动
+                    rowLeftButtons: {}, // 存储各分类榜单左侧按钮显示状态 { movieRow: false, ... }
 
                     // === 动态榜单配置 ===
                     rowLists: {}, // 存储各榜单数据 { movieRow: [...], ... }
@@ -2755,6 +2912,9 @@
             },
             async mounted() {
                 window.addEventListener('scroll', () => { this.scrollY = window.scrollY; });
+
+                // 监听窗口大小变化，更新历史滚动按钮显示状态
+                window.addEventListener('resize', () => { this.updateHistoryScrollNeeded(); });
 
                 // Store reference to app instance for external access
                 window.vueApp = this;
@@ -2856,6 +3016,270 @@
                     } catch (e) {
                         console.error('Sites Load Error:', e);
                     }
+
+                    // 5. 加载观看历史
+                    this.loadWatchHistory();
+                },
+
+                // ========== 📺 观看历史功能 ==========
+                // 加载观看历史
+                loadWatchHistory() {
+                    try {
+                        const saved = localStorage.getItem('donggua_watch_history');
+                        if (saved) {
+                            const history = JSON.parse(saved);
+                            // 过滤掉超过30天的记录
+                            const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+                            this.watchHistory = history.filter(item =>
+                                new Date(item.watchedAt).getTime() > thirtyDaysAgo
+                            );
+                            // 如果有过滤，更新存储
+                            if (this.watchHistory.length !== history.length) {
+                                this.saveWatchHistoryToStorage();
+                            }
+                            console.log('[观看历史] 已加载', this.watchHistory.length, '条记录');
+                            this.$nextTick(() => this.updateHistoryScrollNeeded());
+                        }
+                    } catch (e) {
+                        console.error('[观看历史] 加载失败:', e);
+                    }
+                },
+
+                // 保存观看历史到 localStorage
+                saveWatchHistoryToStorage() {
+                    try {
+                        localStorage.setItem('donggua_watch_history', JSON.stringify(this.watchHistory));
+                    } catch (e) {
+                        console.error('[观看历史] 保存失败:', e);
+                    }
+                },
+
+                // 添加到观看历史（包含 groupData 用于直接播放）
+                addToWatchHistory(name, poster, episode, progress, duration, groupData) {
+                    // 查找是否已存在
+                    const existingIndex = this.watchHistory.findIndex(item => item.name === name);
+
+                    const historyItem = {
+                        name: name,
+                        poster: poster || '',
+                        episode: episode || null,  // 当前集数，如 "第5集"
+                        progress: duration > 0 ? Math.min(Math.round((progress / duration) * 100), 100) : 0,
+                        watchedAt: new Date().toISOString(),
+                        // 保存播放所需的数据（用于直接播放）
+                        groupData: groupData ? {
+                            name: groupData.name,
+                            pic: groupData.pic,
+                            sources: groupData.sources.map((s, idx) => ({
+                                vod_name: s.vod_name,
+                                vod_pic: s.vod_pic,
+                                vod_play_url: s.vod_play_url,
+                                vod_content: s.vod_content || '',  // 剧情介绍
+                                site_name: s.site_name,
+                                site_key: s.site_key || (s.site_name + '_' + idx),  // 用于匹配高亮
+                                latency: s.latency || 500  // 默认延迟
+                            }))
+                        } : null
+                    };
+
+                    if (existingIndex !== -1) {
+                        // 更新已存在的记录
+                        this.watchHistory.splice(existingIndex, 1);
+                    }
+
+                    // 添加到最前面
+                    this.watchHistory.unshift(historyItem);
+
+                    // 限制最多保存30条
+                    if (this.watchHistory.length > 30) {
+                        this.watchHistory = this.watchHistory.slice(0, 30);
+                    }
+
+                    this.saveWatchHistoryToStorage();
+                    console.log('[观看历史] 已保存:', name, '进度:', historyItem.progress + '%', 'groupData:', !!groupData);
+                },
+
+                // 清除观看历史
+                clearWatchHistory() {
+                    if (confirm('确定要清除所有观看历史吗？')) {
+                        this.watchHistory = [];
+                        localStorage.removeItem('donggua_watch_history');
+                        console.log('[观看历史] 已清除');
+                    }
+                },
+
+                // 格式化观看时间
+                formatWatchTime(isoString) {
+                    if (!isoString) return '';
+                    const date = new Date(isoString);
+                    const now = new Date();
+                    const diffMs = now - date;
+                    const diffMins = Math.floor(diffMs / (60 * 1000));
+                    const diffHours = Math.floor(diffMs / (60 * 60 * 1000));
+                    const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+
+                    if (diffMins < 1) return '刚刚';
+                    if (diffMins < 60) return `${diffMins}分钟前`;
+                    if (diffHours < 24) return `${diffHours}小时前`;
+                    if (diffDays < 7) return `${diffDays}天前`;
+                    return `${date.getMonth() + 1}/${date.getDate()}`;
+                },
+
+                // 从历史记录中删除单个项目
+                removeFromHistory(index) {
+                    if (index >= 0 && index < this.watchHistory.length) {
+                        const removed = this.watchHistory.splice(index, 1);
+                        this.saveWatchHistoryToStorage();
+                        this.$nextTick(() => this.updateHistoryScrollNeeded());
+                        console.log('[观看历史] 已删除:', removed[0]?.name);
+                    }
+                },
+
+                // 从历史记录直接播放
+                async playFromHistory(item) {
+                    if (!item || !item.name) return;
+                    console.log('[观看历史] 点击播放:', item.name, 'groupData:', !!item.groupData, 'episode:', item.episode);
+
+                    // 如果有保存的 groupData，直接播放
+                    if (item.groupData && item.groupData.sources && item.groupData.sources.length > 0) {
+                        console.log('[观看历史] 使用保存的数据直接播放');
+
+                        // 确保所有 sources 有 site_key
+                        const sourcesWithKey = item.groupData.sources.map((s, idx) => ({
+                            ...s,
+                            site_key: s.site_key || (s.site_name + '_' + idx),
+                            latency: s.latency || 500
+                        }));
+
+                        // 设置 currentGroup（确保 sources 有正确的 site_key）
+                        this.currentGroup = {
+                            ...item.groupData,
+                            sources: sourcesWithKey
+                        };
+
+                        // 设置 rawList（用于显示资源站列表和允许切换）
+                        this.rawList = sourcesWithKey;
+
+                        // 获取最佳资源
+                        const bestSourceIdx = sourcesWithKey.findIndex(s => s.latency && s.latency < 1000);
+                        const bestSource = bestSourceIdx >= 0 ? sourcesWithKey[bestSourceIdx] : sourcesWithKey[0];
+                        console.log('[观看历史] 选择资源站:', bestSource?.site_name, '延迟:', bestSource?.latency);
+
+                        // 设置 currentSource（使用相同的 site_key）
+                        this.currentSource = bestSource;
+
+                        this.showDetail = true;
+
+                        if (bestSource && bestSource.vod_play_url) {
+                            // 解析播放地址（只从这一个资源站取）
+                            const urls = bestSource.vod_play_url.split('#').filter(u => u && u.includes('$'));
+                            console.log('[观看历史] 解析到', urls.length, '个剧集');
+
+                            if (urls.length > 0) {
+                                // 构建剧集列表（只用一个资源站的）
+                                this.episodeList = urls.map(u => {
+                                    const p = u.split('$');
+                                    return { name: p[0], url: p[1] };
+                                });
+
+                                // 找到对应集数
+                                let targetEpisode = this.episodeList[0];
+                                if (item.episode) {
+                                    // 精确匹配集数名称
+                                    const found = this.episodeList.find(ep => ep.name === item.episode);
+                                    if (found) {
+                                        targetEpisode = found;
+                                        console.log('[观看历史] 找到匹配集数:', item.episode);
+                                    } else {
+                                        console.log('[观看历史] 未找到匹配集数:', item.episode, '使用第一集');
+                                    }
+                                }
+
+                                await this.$nextTick();
+                                if (targetEpisode && targetEpisode.url) {
+                                    this.play(targetEpisode.url, bestSource.site_name);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // 没有保存的数据或解析失败，使用搜索
+                    console.log('[观看历史] 没有保存数据或解析失败，使用搜索');
+                    await this.autoSearch(item.name);
+                },
+
+                // 滚动观看历史（不触发 fetchRow）
+                scrollHistoryRow(direction) {
+                    console.log('[历史滚动] 点击按钮, direction=', direction);
+                    let row = this.$refs.watchHistoryRow;
+                    console.log('[历史滚动] ref 原始值:', this.$refs.watchHistoryRow);
+                    if (Array.isArray(row)) row = row[0];
+                    if (row) {
+                        console.log('[历史滚动] 滚动前 scrollLeft=', row.scrollLeft);
+                        // 每次滚动半屏宽度
+                        const scrollAmount = row.clientWidth * 0.6;
+                        const newScrollLeft = row.scrollLeft + direction * scrollAmount;
+                        console.log('[历史滚动] scrollAmount=', scrollAmount, 'newScrollLeft=', newScrollLeft);
+
+                        // 限制滚动范围
+                        const maxScroll = row.scrollWidth - row.clientWidth;
+                        const finalScrollLeft = Math.max(0, Math.min(newScrollLeft, maxScroll));
+                        console.log('[历史滚动] maxScroll=', maxScroll, 'finalScrollLeft=', finalScrollLeft);
+                        row.scrollLeft = finalScrollLeft;
+                        console.log('[历史滚动] 滚动后 scrollLeft=', row.scrollLeft);
+
+                        // 滚动后延迟更新按钮状态（等待浏览器完成滚动）
+                        setTimeout(() => this.updateHistoryScrollNeeded(), 50);
+                    } else {
+                        console.log('[历史滚动] ❌ row 元素未找到');
+                    }
+                },
+
+                // 检查观看历史滚动按钮状态
+                updateHistoryScrollNeeded() {
+                    let row = this.$refs.watchHistoryRow;
+                    if (Array.isArray(row)) row = row[0];
+                    if (row) {
+                        const scrollLeft = Math.round(row.scrollLeft);
+                        const scrollWidth = row.scrollWidth;
+                        const clientWidth = row.clientWidth;
+                        const maxScroll = scrollWidth - clientWidth;
+
+                        // 左按钮：只有滚动过才显示
+                        this.historyCanScrollLeft = scrollLeft > 10;
+                        // 右按钮：只有当右侧还有未显示内容时显示
+                        this.historyCanScrollRight = maxScroll > 10 && scrollLeft < maxScroll - 10;
+
+                        console.log('[历史按钮状态] scrollLeft=', scrollLeft, 'maxScroll=', maxScroll,
+                            'canLeft=', this.historyCanScrollLeft, 'canRight=', this.historyCanScrollRight);
+                    } else {
+                        this.historyCanScrollLeft = false;
+                        this.historyCanScrollRight = false;
+                    }
+                },
+
+                // 监听观看历史滚动事件
+                onHistoryScroll() {
+                    this.updateHistoryScrollNeeded();
+                },
+
+                // 监听分类榜单滚动事件
+                onRowScroll(key) {
+                    let row = this.$refs[key];
+                    if (Array.isArray(row)) row = row[0]; // v-for ref 修正
+                    if (row) {
+                        // 只要滚过一点点，就显示左按钮
+                        const showLeft = row.scrollLeft > 10;
+                        if (this.rowLeftButtons[key] !== showLeft) {
+                            this.rowLeftButtons = { ...this.rowLeftButtons, [key]: showLeft };
+                        }
+
+                        // 手机端：滑动接近右边缘时自动加载更多
+                        const nearRightEdge = row.scrollLeft + row.clientWidth >= row.scrollWidth - 300;
+                        if (nearRightEdge) {
+                            this.fetchRow(key, true);
+                        }
+                    }
                 },
                 // 切换榜单展开/收起状态
                 toggleRowExpand(key) {
@@ -2916,13 +3340,27 @@
                         console.log(`[DEBUG changeViewPage] Condition passed, setting viewPages[${key}] = ${newPage}`);
                         this.viewPages = { ...this.viewPages, [key]: newPage };
                         console.log(`[DEBUG changeViewPage] viewPages[key] AFTER =`, this.viewPages[key]);
-                        // 翻页后滚动到分类标题位置（预留顶部导航栏 80px 空间）
+                        // 翻页后滚动到分类标题位置
+                        console.log(`[翻页滚动] 开始处理 key=${key}`);
                         this.$nextTick(() => {
-                            const sectionRef = this.$refs[key + '-section'];
+                            console.log(`[翻页滚动] $nextTick 触发`);
+                            const refKey = key + '-section';
+                            console.log(`[翻页滚动] 查找 ref: ${refKey}`);
+                            console.log(`[翻页滚动] $refs 所有键:`, Object.keys(this.$refs));
+                            const sectionRef = this.$refs[refKey];
+                            console.log(`[翻页滚动] sectionRef =`, sectionRef);
                             let el = Array.isArray(sectionRef) ? sectionRef[0] : sectionRef;
+                            console.log(`[翻页滚动] el =`, el);
                             if (el) {
-                                const top = el.getBoundingClientRect().top + window.scrollY - 80;
-                                window.scrollTo({ top: top, behavior: 'smooth' });
+                                const rect = el.getBoundingClientRect();
+                                console.log(`[翻页滚动] rect =`, rect);
+                                console.log(`[翻页滚动] window.pageYOffset =`, window.pageYOffset);
+                                const targetY = window.pageYOffset + rect.top - 80;
+                                console.log(`[翻页滚动] 目标位置 targetY =`, targetY);
+                                window.scrollTo(0, targetY);
+                                console.log(`[翻页滚动] scrollTo 已调用`);
+                            } else {
+                                console.log(`[翻页滚动] ❌ 未找到元素`);
                             }
                         });
                     } else {
@@ -3115,11 +3553,11 @@
                         .catch(err => console.error(`Fetch error for ${key}:`, err));
                 },
 
-                // 初始化榜单 (懒加载模式 - 移动端直接顺序加载)
+                // 初始化榜单 (全部直接加载，避免懒加载问题)
                 fetchAllLists() {
                     const keys = Object.keys(this.rowConfigs);
 
-                    // 更可靠的移动端检测（多种方法）
+                    // 设备检测（仅用于日志）
                     const viewportWidth = window.innerWidth;
                     const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
                     const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
@@ -3127,57 +3565,13 @@
 
                     console.log(`[设备检测] 宽度=${viewportWidth}, 触摸=${isTouchDevice}, UA移动=${isMobileUA}, 判定=${isMobile ? '移动端' : '桌面端'}`);
 
-                    // 移动端：直接顺序加载所有榜单（Intersection Observer 不可靠）
-                    if (isMobile) {
-                        console.log(`[移动端] 直接加载所有 ${keys.length} 个榜单`);
-                        keys.forEach((key, index) => {
-                            // 每个榜单间隔 300ms 加载，避免 API 速率限制
-                            setTimeout(() => {
-                                console.log(`[移动端] 正在加载: ${key}`);
-                                this.fetchRow(key);
-                            }, index * 300);
-                        });
-                        return;
-                    }
-
-                    // 桌面端：使用 Intersection Observer 懒加载
-                    const EAGER_LOAD_COUNT = 2;
-
-                    // 1. 立即加载前 2 个榜单
-                    keys.slice(0, EAGER_LOAD_COUNT).forEach((key, index) => {
+                    // 统一使用直接加载所有榜单（无论移动端还是桌面端）
+                    console.log(`[榜单加载] 直接加载所有 ${keys.length} 个榜单`);
+                    keys.forEach((key, index) => {
+                        // 每个榜单间隔 200ms 加载，避免 API 速率限制
                         setTimeout(() => {
                             this.fetchRow(key);
                         }, index * 200);
-                    });
-
-                    // 2. 其他榜单使用 Intersection Observer 懒加载
-                    this.$nextTick(() => {
-                        const lazyKeys = keys.slice(EAGER_LOAD_COUNT);
-                        if (lazyKeys.length === 0) return;
-
-                        const observer = new IntersectionObserver((entries) => {
-                            entries.forEach(entry => {
-                                if (entry.isIntersecting) {
-                                    const key = entry.target.dataset.rowKey;
-                                    if (key && !this.rowLists[key]) {
-                                        console.log(`[懒加载] 加载榜单: ${key}`);
-                                        this.fetchRow(key);
-                                    }
-                                    observer.unobserve(entry.target);
-                                }
-                            });
-                        }, {
-                            rootMargin: '300px 0px',
-                            threshold: 0.01
-                        });
-
-                        // 使用 querySelectorAll 获取所有榜单元素
-                        lazyKeys.forEach(key => {
-                            const el = document.querySelector(`[data-row-key="${key}"]`);
-                            if (el) {
-                                observer.observe(el);
-                            }
-                        });
                     });
                 },
 
@@ -3187,8 +3581,9 @@
                     if (Array.isArray(row)) row = row[0];
 
                     if (row) {
-                        const scrollAmount = window.innerWidth * 0.5; // 每次翻半页，体验更好
-                        row.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+                        // 每次滚动半屏宽度
+                        const scrollAmount = row.clientWidth * 0.6;
+                        row.scrollLeft += direction * scrollAmount;
 
                         // 向右滚动时触发加载下一页
                         if (direction > 0) {
@@ -3495,9 +3890,23 @@
                 async switchSource(source) {
                     this.currentSource = source;
                     this.loadingDetail = true;
+
+                    // 记住当前集数名称，切换后尝试保留（在清空之前获取！）
+                    const previousEpName = this.episodeList?.find(ep => ep.url === this.currentUrl)?.name;
+                    console.log('[切换资源] 当前集数:', previousEpName);
+
                     this.episodeList = [];
 
                     try {
+
+                        // 如果 source 已经有 vod_play_url（来自历史记录），直接使用
+                        if (source.vod_play_url) {
+                            console.log('[切换资源] 使用已有的 vod_play_url');
+                            this.parseEpisodes(source.vod_play_url, previousEpName);
+                            this.loadingDetail = false;
+                            return;
+                        }
+
                         // 优先使用测速时缓存的详情数据
                         let detail = source._cachedDetail;
 
@@ -3513,12 +3922,14 @@
                         if (detail) {
                             // 保存简介信息到当前源
                             this.currentSource.vod_content = detail.vod_content || detail.vod_blurb || '';
-                            this.parseEpisodes(detail.vod_play_url);
+                            this.parseEpisodes(detail.vod_play_url, previousEpName);
                         }
-                    } catch (e) { }
+                    } catch (e) { console.log('[切换资源] 错误:', e); }
                     this.loadingDetail = false;
                 },
-                parseEpisodes(urlStr) {
+
+                // 解析剧集列表，尝试匹配指定集数
+                parseEpisodes(urlStr, targetEpName) {
                     let playSource = urlStr;
                     if (urlStr.includes('$$$')) {
                         const sets = urlStr.split('$$$');
@@ -3528,7 +3939,25 @@
                         const p = ep.split('$');
                         return { name: p.length > 1 ? p[0] : '正片', url: p.length > 1 ? p[1] : p[0] };
                     });
-                    if (this.episodeList.length > 0) this.play(this.episodeList[0].url);
+
+                    if (this.episodeList.length > 0) {
+                        // 尝试找到与之前相同名称的集数
+                        let targetEp = this.episodeList[0];
+                        if (targetEpName) {
+                            // 标准化集数名称进行匹配
+                            const normalize = (name) => name?.replace(/第0*(\d+)集/g, '第$1集') || '';
+                            const normalizedTarget = normalize(targetEpName);
+
+                            const found = this.episodeList.find(ep => normalize(ep.name) === normalizedTarget);
+                            if (found) {
+                                targetEp = found;
+                                console.log('[切换资源] 找到匹配集数:', targetEp.name);
+                            } else {
+                                console.log('[切换资源] 未找到匹配集数:', targetEpName, '使用第一集');
+                            }
+                        }
+                        this.play(targetEp.url);
+                    }
                 },
                 play(url) {
                     this.currentUrl = url;
@@ -3564,7 +3993,7 @@
                             preload: 'auto',         // 自动预加载
                             volume: 0.8,             // 默认音量 80%
                             loop: false,             // 循环播放（可在设置中切换）
-                            playbackSpeed: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3],  // 0.25间隔倍速选项
+                            playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3],  // 0.25间隔倍速选项
                             video: { url: url, type: 'hls' },
                             contextmenu: [
                                 { text: '🎬 E视界MAX', link: '/' },
@@ -3918,7 +4347,7 @@
                             return normalized || '正片';
                         };
 
-                        // 智能 Key 生成：
+                        // 智能 Key 生成（使用 this.currentUrl 动态获取当前集数）
                         // - 电影（只有1集）：忽略集数名称（正片/HD/HD中字等），只用电影名
                         // - 剧集（多集）：使用电影名 + 标准化集数
                         const getProgressKey = () => {
@@ -3930,10 +4359,10 @@
                                 return key.substring(0, 80);
                             }
 
-                            // 多集（剧集），使用电影名 + 集数
+                            // 多集（剧集），使用电影名 + 当前播放集数（动态获取！）
                             let episodeName = '正片';
                             if (this.episodeList && this.episodeList.length > 0) {
-                                const currentEp = this.episodeList.find(ep => ep.url === url);
+                                const currentEp = this.episodeList.find(ep => ep.url === this.currentUrl);
                                 if (currentEp) {
                                     episodeName = normalizeEpisodeName(currentEp.name);
                                 }
@@ -3942,8 +4371,8 @@
                             return 'donggua_progress_' + combined.substring(0, 80);
                         };
 
-                        const progressKey = getProgressKey();
-                        console.log('[进度记忆] Key:', progressKey);
+                        // 注意：progressKey 现在是动态计算的，每次调用 getProgressKey() 获取
+                        console.log('[进度记忆] 初始 Key:', getProgressKey());
 
                         // 恢复播放进度
                         let progressRestored = false;
@@ -3951,8 +4380,9 @@
                             if (progressRestored) return;
 
                             try {
-                                const saved = localStorage.getItem(progressKey);
-                                console.log('[进度记忆] canplay 触发, Key:', progressKey);
+                                const currentKey = getProgressKey();
+                                const saved = localStorage.getItem(currentKey);
+                                console.log('[进度记忆] canplay 触发, Key:', currentKey);
                                 console.log('[进度记忆] 存储数据:', saved);
                                 console.log('[进度记忆] 视频时长:', dp.video.duration);
                                 console.log('[进度记忆] 当前时间:', dp.video.currentTime);
@@ -3968,12 +4398,12 @@
                                     console.log('[进度记忆] 保存时间:', savedTime, '秒');
                                     console.log('[进度记忆] 保存日期:', savedData.date, `(${daysDiff.toFixed(1)}天前)`);
 
-                                    // 只恢复7天内的进度，且进度在有效范围内
-                                    const isTimeOK = daysDiff < 7;
-                                    const isMinOK = savedTime > 10;
-                                    const isMaxOK = dp.video.duration && savedTime < dp.video.duration - 30;
+                                    // 只恢复30天内的进度，且进度在有效范围内
+                                    const isTimeOK = daysDiff < 30;
+                                    const isMinOK = savedTime > 60;  // 至少看过1分钟
+                                    const isMaxOK = dp.video.duration && savedTime < dp.video.duration - 120;  // 距离结尾>2分钟
 
-                                    console.log('[进度记忆] 检查: 7天内=' + isTimeOK + ', >10秒=' + isMinOK + ', <结尾30秒=' + isMaxOK);
+                                    console.log('[进度记忆] 检查: 30天内=' + isTimeOK + ', >1分钟=' + isMinOK + ', <结尾2分钟=' + isMaxOK);
 
                                     if (isTimeOK && isMinOK && isMaxOK) {
                                         console.log('[进度记忆] ✅ 准备跳转到:', savedTime);
@@ -4008,26 +4438,51 @@
                             progressRestored = true;
                         });
 
-                        // 智能保存进度：只保存更大的进度值，防止进度倒退
-                        const saveProgressIfLarger = (currentTime) => {
-                            if (currentTime <= 10) return; // 太短不保存
+                        // 进度保存逻辑：
+                        // - 只有当前位置 > 1分钟 才保存（防止从头看的资源覆盖进度）
+                        // - 允许进度倒退（用户可能重新开始看）
+                        // - 距离结尾 < 2分钟 视为完播，清除进度
+                        const saveProgress = (currentTime) => {
+                            const duration = dp.video?.duration || 0;
+
+                            // 获取电影信息用于观看历史
+                            const movieName = this.currentGroup?.name || '';
+                            const poster = this.currentGroup?.pic || '';
+                            // 使用 this.currentUrl 获取当前正在播放的集数（而不是闭包中固定的 url）
+                            const currentEp = this.episodeList?.find(ep => ep.url === this.currentUrl);
+                            const episodeName = (this.episodeList?.length > 1 && currentEp) ? currentEp.name : null;
+
+                            console.log('[进度记忆] 当前集数:', episodeName, '当前URL:', this.currentUrl?.substring(0, 30));
+
+                            // 如果距离结尾 < 2分钟，视为完播，清除进度
+                            if (duration > 0 && currentTime > duration - 120) {
+                                localStorage.removeItem(getProgressKey());
+                                console.log('[进度记忆] 即将完播，清除进度记录');
+                                // 更新观看历史（进度100%）
+                                if (movieName) {
+                                    this.addToWatchHistory(movieName, poster, episodeName, duration, duration, this.currentGroup);
+                                }
+                                return;
+                            }
+
+                            // 只有播放位置 > 1分钟才保存（防止从头播放的资源覆盖进度）
+                            if (currentTime <= 60) {
+                                console.log('[进度记忆] 当前位置 < 1分钟，不保存进度和历史');
+                                return;
+                            }
 
                             try {
-                                const existing = localStorage.getItem(progressKey);
-                                if (existing) {
-                                    const existingData = JSON.parse(existing);
-                                    // 只有当新进度大于已保存进度时才更新
-                                    if (currentTime <= existingData.time) {
-                                        return; // 不覆盖更大的进度
-                                    }
-                                }
-
                                 const data = {
                                     time: Math.floor(currentTime),
                                     date: new Date().toISOString()
                                 };
-                                localStorage.setItem(progressKey, JSON.stringify(data));
-                                console.log('[进度记忆] 保存进度:', currentTime.toFixed(0), '秒');
+                                localStorage.setItem(getProgressKey(), JSON.stringify(data));
+                                console.log('[进度记忆] 保存进度:', currentTime.toFixed(0), '秒, 集数:', episodeName);
+
+                                // 同时更新观看历史（只有进度 > 1分钟才更新，防止覆盖为0）
+                                if (movieName) {
+                                    this.addToWatchHistory(movieName, poster, episodeName, currentTime, duration, this.currentGroup);
+                                }
                             } catch (e) {
                                 console.log('[进度记忆] 保存失败:', e);
                             }
@@ -4036,28 +4491,37 @@
                         // 定时保存进度 (每15秒)
                         const progressSaveInterval = setInterval(() => {
                             if (dp.video && !dp.video.paused) {
-                                saveProgressIfLarger(dp.video.currentTime);
+                                saveProgress(dp.video.currentTime);
                             }
                         }, 15000);
 
                         // 暂停时保存
                         dp.on('pause', () => {
                             if (dp.video) {
-                                saveProgressIfLarger(dp.video.currentTime);
+                                saveProgress(dp.video.currentTime);
                             }
                         });
 
                         // 页面关闭前保存
                         window.addEventListener('beforeunload', () => {
                             if (dp.video) {
-                                saveProgressIfLarger(dp.video.currentTime);
+                                saveProgress(dp.video.currentTime);
                             }
                         });
 
                         // 播放结束时清除进度记录
                         dp.on('ended', () => {
-                            localStorage.removeItem(progressKey);
+                            localStorage.removeItem(getProgressKey());
                             console.log('[进度记忆] 播放完毕，清除记录');
+                            // 更新观看历史（进度100%）
+                            const movieName = this.currentGroup?.name || '';
+                            const poster = this.currentGroup?.pic || '';
+                            const currentEp = this.episodeList?.find(ep => ep.url === this.currentUrl);
+                            const episodeName = (this.episodeList?.length > 1 && currentEp) ? currentEp.name : null;
+                            const duration = dp.video?.duration || 0;
+                            if (movieName) {
+                                this.addToWatchHistory(movieName, poster, episodeName, duration, duration, this.currentGroup);
+                            }
                         });
 
                     } else {
