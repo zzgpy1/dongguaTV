@@ -5021,6 +5021,9 @@
                         if (dp.video) {
                             dp.video.addEventListener('ratechange', () => {
                                 const speed = dp.video.playbackRate;
+                                // 💾 记住用户选择的倍速
+                                try { localStorage.setItem('dplayer_speed', speed); } catch (e) { }
+
                                 const dplayerContainer = document.getElementById('dplayer');
 
                                 // 1. 更新右键菜单文本
@@ -5627,6 +5630,16 @@
                         // 恢复播放进度
                         let progressRestored = false;
                         dp.on('canplay', () => {
+                            // 💾 恢复倍速设置 (每次视频加载都检查)
+                            try {
+                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
+                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
+                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
+                                        dp.speed(savedSpeed);
+                                    }
+                                }
+                            } catch (e) { }
+
                             if (progressRestored) return;
 
                             try {
