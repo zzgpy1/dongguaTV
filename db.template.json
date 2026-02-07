@@ -7,12 +7,6 @@
             "active": true
         },
         {
-            "key": "155api",
-            "name": "AV-155资源",
-            "api": "https://155api.com/api.php/provide/vod",
-            "active": true
-        },
-        {
             "key": "360zy",
             "name": "TV-360资源",
             "api": "https://360zy.com/api.php/provide/vod",
@@ -175,12 +169,6 @@
             "active": true
         },
         {
-            "key": "bwzyz",
-            "name": "AV-百万资源",
-            "api": "https://api.bwzyz.com/api.php/provide/vod",
-            "active": true
-        },
-        {
             "key": "apibdzy",
             "name": "TV-百度云资源",
             "api": "https://api.apibdzy.com/api.php/provide/vod",
@@ -307,132 +295,6 @@
             "active": true
         },
         {
-            "key": "91md",
-            "name": "AV-91麻豆",
-            "api": "https://91md.me/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "lbapiby",
-            "name": "AV-AIvin",
-            "api": "http://lbapiby.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "jkunzyapi",
-            "name": "AV-JKUN资源",
-            "api": "https://jkunzyapi.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "souavzy",
-            "name": "AV-souav资源",
-            "api": "https://api.souavzy.vip/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "lbapi9",
-            "name": "AV-乐播资源",
-            "api": "https://lbapi9.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "aosikazy",
-            "name": "AV-奥斯卡资源",
-            "api": "https://aosikazy.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "naixxzy",
-            "name": "AV-奶香香",
-            "api": "https://Naixxzy.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "slapibf",
-            "name": "AV-森林资源",
-            "api": "https://slapibf.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "xrbsp",
-            "name": "AV-淫水机资源",
-            "api": "https://www.xrbsp.com/api/json.php",
-            "active": true
-        },
-        {
-            "key": "apiyutu",
-            "name": "AV-玉兔资源",
-            "api": "https://apiyutu.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "fhapi9",
-            "name": "AV-番号资源",
-            "api": "http://fhapi9.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "kxgav",
-            "name": "AV-白嫖资源",
-            "api": "https://www.kxgav.com/api/json.php",
-            "active": true
-        },
-        {
-            "key": "jingpinx",
-            "name": "AV-精品资源",
-            "api": "https://www.jingpinx.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "msnii",
-            "name": "AV-美少女资源",
-            "api": "https://www.msnii.com/api/json.php",
-            "active": true
-        },
-        {
-            "key": "apilsbzy1",
-            "name": "AV-老色逼资源",
-            "api": "https://apilsbzy1.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "sexnguon",
-            "name": "AV-色嗨国",
-            "api": "https://api.sexnguon.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "maozyapi",
-            "name": "AV-色猫资源",
-            "api": "https://api.maozyapi.com/inc/apijson_vod.php",
-            "active": true
-        },
-        {
-            "key": "apilj",
-            "name": "AV-辣椒资源",
-            "api": "https://apilj.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "gdlsp",
-            "name": "AV-香奶儿资源",
-            "api": "https://www.gdlsp.com/api/json.php",
-            "active": true
-        },
-        {
-            "key": "shayuapi",
-            "name": "AV-鲨鱼资源",
-            "api": "https://shayuapi.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "pgxdy",
-            "name": "AV-黄AV资源",
-            "api": "https://www.pgxdy.com/api/json.php",
-            "active": true
-        },
-        {
             "key": "ffzynew",
             "name": "非凡影视new",
             "api": "https://api.ffzyapi.com/api.php/provide/vod",
@@ -442,18 +304,6 @@
             "key": "jszyapi",
             "name": "极速资源",
             "api": "https://jszyapi.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "gayapi",
-            "name": "快播资源网站",
-            "api": "https://gayapi.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "xingba111",
-            "name": "性吧资源",
-            "api": "https://xingba111.com/api.php/provide/vod",
             "active": true
         },
         {
@@ -511,12 +361,6 @@
             "active": true
         },
         {
-            "key": "hsckzy888",
-            "name": "黄色资源啊啊",
-            "api": "https://hsckzy888.com/api.php/provide/vod",
-            "active": true
-        },
-        {
             "key": "xiaojizy",
             "name": "小鸡资源",
             "api": "https://api.xiaojizy.live/provide/vod",
@@ -535,12 +379,6 @@
             "active": true
         },
         {
-            "key": "apilj_provide",
-            "name": "辣椒资源黄黄",
-            "api": "https://apilj.com/api.php/provide",
-            "active": true
-        },
-        {
             "key": "yzzy_api",
             "name": "优质资源库1080zyk6.com高清",
             "api": "https://api.yzzy-api.com/inc/ldg_api_all.php/provide/vod",
@@ -550,12 +388,6 @@
             "key": "iqiyizyapi",
             "name": "iqiyi资源",
             "api": "https://www.iqiyizyapi.com/api.php/provide/vod",
-            "active": true
-        },
-        {
-            "key": "xxibaozyw",
-            "name": "细胞采集黄色",
-            "api": "https://www.xxibaozyw.com/api.php/provide/vod",
             "active": true
         },
         {
