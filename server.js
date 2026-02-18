@@ -987,8 +987,39 @@ app.get('/api/search', async (req, res) => {
     const sites = getDB().sites;
 
     if (!stream) {
-        // 非流式模式：返回普通 JSON
-        return res.json({ error: 'Use stream=true for GET requests' });
+        // 非流式模式：返回聚合的 JSON 结果（用于 refreshEpisodes 查找 vod_id）
+        const siteKey = req.query.site_key;  // 可选：只搜索指定站点
+        const targetSites = siteKey ? sites.filter(s => s.key === siteKey) : sites;
+
+        const allResults = [];
+        const searchPromises = targetSites.map(async (site) => {
+            const cacheKey = `${site.key}_${keyword}`;
+            const cached = cacheManager.get('search', cacheKey);
+            if (cached && cached.list) {
+                cached.list.forEach(item => {
+                    allResults.push({ ...item, site_key: site.key, site_name: site.name });
+                });
+                return;
+            }
+            try {
+                const searchUrl = `${site.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
+                const { data } = await fetchWithProxyFallback(searchUrl, { timeout: 8000 }, site.key);
+                const list = data.list ? data.list.map(item => ({
+                    vod_id: item.vod_id,
+                    vod_name: item.vod_name,
+                    vod_pic: item.vod_pic,
+                    vod_play_url: item.vod_play_url,
+                    site_key: site.key,
+                    site_name: site.name
+                })) : [];
+                cacheManager.set('search', cacheKey, { list }, 3600);
+                allResults.push(...list);
+            } catch (err) {
+                console.error(`[Search JSON] ${site.name}:`, err.message);
+            }
+        });
+        await Promise.all(searchPromises);
+        return res.json({ list: allResults });
     }
 
     // SSE 流式模式
@@ -1167,17 +1198,22 @@ app.post('/api/search', async (req, res) => {
 app.get('/api/detail', async (req, res) => {
     const id = req.query.id;
     const siteKey = req.query.site_key;
+    const nocache = req.query.nocache === '1';
     const sites = getDB().sites;
     const site = sites.find(s => s.key === siteKey);
 
     if (!site) return res.status(404).json({ error: 'Site not found' });
 
     const cacheKey = `${siteKey}_detail_${id}`;
-    const cached = cacheManager.get('detail', cacheKey);
-    if (cached) {
-        console.log(`[Cache] Hit detail: ${cacheKey}`);
-        // 返回格式：{ list: [detail] }，与前端期望一致
-        return res.json({ list: [cached] });
+    if (!nocache) {
+        const cached = cacheManager.get('detail', cacheKey);
+        if (cached) {
+            console.log(`[Cache] Hit detail: ${cacheKey}`);
+            // 返回格式：{ list: [detail] }，与前端期望一致
+            return res.json({ list: [cached] });
+        }
+    } else {
+        console.log(`[Detail] nocache=1, 跳过缓存: ${cacheKey}`);
     }
 
     try {
@@ -1289,7 +1325,13 @@ app.get('/api/tmdb-image/:size/:filename', async (req, res) => {
         return res.sendFile(localPath);
     }
 
-    // 2. 下载并缓存
+    // 2. 下载并缓存（支持 TMDB_PROXY_URL 代理）
+    let fetchUrl = tmdbUrl;
+    if (process.env['TMDB_PROXY_URL']) {
+        const proxyBase = process.env['TMDB_PROXY_URL'].replace(/\/$/, '');
+        fetchUrl = `${proxyBase}/t/p/${size}/${filename}`;
+    }
+
     if (!fs.existsSync(localDir)) {
         try {
             fs.mkdirSync(localDir, { recursive: true });
@@ -1297,16 +1339,16 @@ app.get('/api/tmdb-image/:size/:filename', async (req, res) => {
             console.error('[Cache Mkdir Error]', e.message);
             // 如果创建目录失败，降级为直接流式转发
             try {
-                const response = await axios({ url: tmdbUrl, method: 'GET', responseType: 'stream' });
+                const response = await axios({ url: fetchUrl, method: 'GET', responseType: 'stream' });
                 return response.data.pipe(res);
             } catch (err) { return res.status(404).send('Image not found'); }
         }
     }
 
     try {
-        console.log(`[Image Proxy] Fetching: ${tmdbUrl}`);
+        console.log(`[Image Proxy] Fetching: ${fetchUrl}`);
         const response = await axios({
-            url: tmdbUrl,
+            url: fetchUrl,
             method: 'GET',
             responseType: 'stream',
             timeout: 10000
@@ -1323,7 +1365,7 @@ app.get('/api/tmdb-image/:size/:filename', async (req, res) => {
         // 发送文件
         res.sendFile(localPath);
     } catch (error) {
-        console.error(`[Image Proxy Error] ${tmdbUrl}:`, error.message);
+        console.error(`[Image Proxy Error] ${fetchUrl}:`, error.message);
         if (fs.existsSync(localPath)) {
             try { fs.unlinkSync(localPath); } catch (e) { }
         }
