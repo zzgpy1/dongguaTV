@@ -3180,9 +3180,12 @@
                 <i class="fas fa-cog"></i>
                 <span>偏好设置</span>
             </div>
-            <!-- 隐藏的退出登录按钮：连续点击3次退出 -->
-            <div style="font-size:10px; margin-top:5px; opacity:0.5; cursor: default; user-select: none;"
-                @click="handleFooterClick" :title="footerClickCount >= 2 ? '再点击1次退出登录' : ''">
+            <!-- 退出登录按钮 -->
+            <div class="tv-mode-toggle" @click="confirmLogout" style="margin-top: 10px;" title="退出登录">
+                <i class="fas fa-sign-out-alt"></i>
+                <span>退出登录</span>
+            </div>
+            <div style="font-size:10px; margin-top:12px; opacity:0.5; user-select: none;">
                 Data provided by TMDb & Maccms APIs
             </div>
         </div>
@@ -3683,6 +3686,32 @@
 
         let dp = null;
 
+        // 💾 倍速恢复辅助 — 多次重试确保 HLS.js 不会重置
+        function ensurePlaybackSpeed(player) {
+            try {
+                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
+                if (!savedSpeed || isNaN(savedSpeed) || savedSpeed === 1) return;
+                if (!player || !player.video) return;
+
+                const applySpeed = () => {
+                    if (player.video && Math.abs(player.video.playbackRate - savedSpeed) > 0.01) {
+                        player.speed(savedSpeed);
+                    }
+                };
+
+                applySpeed();
+                setTimeout(applySpeed, 200);
+                setTimeout(applySpeed, 500);
+                setTimeout(applySpeed, 1500);
+
+                const onPlaying = () => {
+                    applySpeed();
+                    player.video.removeEventListener('playing', onPlaying);
+                };
+                player.video.addEventListener('playing', onPlaying);
+            } catch (e) { }
+        }
+
         createApp({
             data() {
                 return {
@@ -3773,7 +3802,7 @@
                     syncStatus: 'idle',  // 同步状态: idle, syncing, success, error
                     syncToken: '',  // 用户同步 Token (密码哈希)
                     lastSyncTime: 0,  // 上次同步时间戳
-                    footerClickCount: 0,  // 用于隐蔽退出登录的点击计数
+                    // footerClickCount removed (now using visible logout button)
 
                     rowLeftButtons: {}, // 存储各分类榜单左侧按钮显示状态 { movieRow: false, ... }
 
@@ -4611,22 +4640,7 @@
                     }
                 },
 
-                // 页脚隐蔽退出（连续点击3次触发）
-                handleFooterClick() {
-                    this.footerClickCount++;
-
-                    // 2秒内没有继续点击则重置计数
-                    clearTimeout(this._footerClickTimer);
-                    this._footerClickTimer = setTimeout(() => {
-                        this.footerClickCount = 0;
-                    }, 2000);
-
-                    // 点击3次触发退出确认
-                    if (this.footerClickCount >= 3) {
-                        this.footerClickCount = 0;
-                        this.confirmLogout();
-                    }
-                },
+                // handleFooterClick removed (now using visible logout button)
 
                 // 格式化观看时间
                 formatWatchTime(isoString) {
@@ -5109,7 +5123,7 @@
                                 console.log('[投屏] 无法显示投屏菜单:', err);
 
                                 // 只有在明确报错无法显示菜单时，才提示用户
-                                alert('无可用投屏设备或浏览器受限。\n\n1. 请确保电视/投影已开机并连接同一WiFi\n2. 确保通过 HTTPS 访问\n3. 或使用浏览器菜单中的"投射"功能');
+                                alert('未找到投屏设备。\n\n请先在手机下拉通知栏 → 点击「投屏/Cast」→ 搜索并连接您的电视，连接成功后再点击一键投屏即可。');
                             });
                         return;
                     }
@@ -6811,14 +6825,7 @@
                         let progressRestored = false;
                         dp.on('canplay', () => {
                             // 💾 恢复倍速设置 (每次视频加载都检查)
-                            try {
-                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
-                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
-                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
-                                        dp.speed(savedSpeed);
-                                    }
-                                }
-                            } catch (e) { }
+                            ensurePlaybackSpeed(dp);
 
                             if (progressRestored) return;
 
@@ -7022,15 +7029,7 @@
                             console.log('[进度记忆-切换] progressRestored:', progressRestored);
 
                             // 💾 恢复倍速设置 (每次切换视频都检查)
-                            try {
-                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
-                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
-                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
-                                        dp.speed(savedSpeed);
-                                        console.log('[倍速恢复] 切换视频后恢复倍速:', savedSpeed + 'x');
-                                    }
-                                }
-                            } catch (e) { }
+                            ensurePlaybackSpeed(dp);
 
                             if (progressRestored) {
                                 console.log('[进度记忆-切换] 已恢复过，跳过');
