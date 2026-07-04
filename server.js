@@ -66,12 +66,41 @@ const REMOTE_DB_URL = process.env['REMOTE_DB_URL'] || '';
 // CORS 代理 URL（用于中转无法直接访问的资源站 API）
 const CORS_PROXY_URL = process.env['CORS_PROXY_URL'] || '';
 
+// 📺 直播(IPTV)：上游 M3U 源(vbskycn/iptv，每6h更新)。可用 LIVE_M3U_URL 覆盖主源、LIVE_M3U_FALLBACK 覆盖备源；
+//    设 LIVE_TV_DISABLED=1 整体关闭(前端隐藏直播区、后端 /api/live/channels 返回 enabled:false)。
+const LIVE_M3U_URL = process.env['LIVE_M3U_URL'] || 'https://live.zbds.top/tv/iptv4.m3u';
+const LIVE_M3U_FALLBACK = process.env['LIVE_M3U_FALLBACK'] || 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u';
+// 第二上游(iptv-org cn)：补 CDN 域名源——vbskycn 的 CCTV 多是运营商 IP(封 Cloudflare 放不了)，iptv-org 有 cctvplus 等 CDN 源。
+const LIVE_M3U_IPTVORG = process.env['LIVE_M3U_IPTVORG'] || 'https://iptv-org.github.io/iptv/countries/cn.m3u';
+// 第三上游(iptv-org 中文语言表)：countries/cn 多是运营商 IP；languages/zho 反而收录大量【海外 CDN】华语源——
+// CCTV-1~17 完整 + CGTN 全家(News/Doc/西/阿/俄/法,多带 ACAO:*) + CCTV-4 America/Europe/Asia + 卫视。实测海外可播的关键补充。
+const LIVE_M3U_ZHO = process.env['LIVE_M3U_ZHO'] || 'https://iptv-org.github.io/iptv/languages/zho.m3u';
+// 自定义上游(可选)：用户有付费 IPTV 的 m3u 可设 LIVE_M3U_EXTRA(逗号分隔多个)，并入合并 → 能播什么由它决定。
+const LIVE_M3U_EXTRA = (process.env['LIVE_M3U_EXTRA'] || '').split(',').map(s => s.trim()).filter(Boolean);
+// 🏀 免费 CCTV5 / CCTV5+：第三方 redirector → 咪咕(migu)源。https + ACAO:*，海外【直连】可播
+//    (实测返回真 TS 分段、media-seq 实时递增，非 catvod 那种 backup 待机台)。仅这两个体育频道稳定可用——其余 /cctv/N 皆 404。
+//    放在合并最前 → 与上游同名 CCTV5/CCTV5+ 归并时其 https 线路(rank0)排第一被优先播，运营商死源退为兜底。源失效用 LIVE_M3U_DISABLE 连内置一起关。
+const LIVE_KAFEI_GEN = [
+    { name: 'CCTV5', group: '体育', url: 'https://live.666666.zip/cctv/5.m3u8' },
+    { name: 'CCTV5+', group: '体育', url: 'https://live.666666.zip/cctv/5p.m3u8' },
+];
+// 布尔型环境变量：0/false/no/off/空 都算"未开启"——JS 里 "0"/"false" 是 truthy，
+// 用户把 LIVE_TV_DISABLED=0 当"不禁用"填时曾把整个直播关掉(线上事故:首页直播频道消失)。
+const envFlag = (name) => { const v = String(process.env[name] ?? '').trim().toLowerCase(); return v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off'; };
+const LIVE_TV_ENABLED = !envFlag('LIVE_TV_DISABLED');
+// LIVE_M3U_DISABLE=1：关掉所有内置上游(vbskycn/iptv-org/国际/内置CCTV5源)，只用 LIVE_M3U_EXTRA 自定义源。
+const LIVE_BUILTIN = !envFlag('LIVE_M3U_DISABLE');
+// 后台验证：每次刷新后通过 worker(http源)/直连(https源)实测每个频道首条线路能否播，标 ok 并把能播的排前。
+// 不删频道(全列出),只标记+排序。设 LIVE_NO_VALIDATE=1 关闭(纯全列出、不打 worker)。
+const LIVE_VALIDATE = !envFlag('LIVE_NO_VALIDATE');
+
 // 环境变量加载状态日志（用于 Vercel 调试）
 console.log(`[System] Environment: ${process.env.VERCEL ? 'Vercel Serverless' : 'Local/VPS'}`);
 console.log(`[System] TMDB_API_KEY: ${process.env.TMDB_API_KEY ? '✓ Configured' : '✗ Missing'}`);
 console.log(`[System] TMDB_PROXY_URL: ${process.env['TMDB_PROXY_URL'] || '(not set)'}`);
 console.log(`[System] CORS_PROXY_URL: ${CORS_PROXY_URL || '(not set)'}`);
 console.log(`[System] REMOTE_DB_URL: ${REMOTE_DB_URL ? '✓ Configured' : '(not set)'}`);
+console.log(`[System] 直播(IPTV): ${LIVE_TV_ENABLED ? '✓ 启用 (' + LIVE_M3U_URL + ')' : '✗ 已禁用 (LIVE_TV_DISABLED)'}`);
 
 
 
@@ -971,6 +1000,280 @@ app.use(express.static('public', {
 
 const IS_VERCEL = !!process.env.VERCEL;
 
+// ========== 📺 直播(IPTV)频道：拉取上游 M3U → 解析 → 精选 → 缓存(6h) ==========
+// 服务器只负责"拉取+精选+缓存+定时更新"；真正的"测速/线路选择/可用性"放在客户端做——
+// 直播多为 http:// 运营商源(混合内容)，实际播放走 CF Worker 代理，客户端在自己网络上测才准。
+const LIVE_CACHE_TTL = 6 * 60 * 60 * 1000;
+let _liveCache = { at: 0, data: [], ok: false };
+let _liveInflight = null;
+
+// 分类映射 + 展示顺序。用户选"全列出不验证"：上游全部频道按分类下发，主页行显示前几类，
+// 播放页"快速换台"出 grid + 分类筛选。客户端测线路挑能播的(运营商 IP 源封 CF，放不了)。
+const LIVE_GROUP_MAP = {
+    '央视频道': '央视', '卫视频道': '卫视', '体育频道': '体育', '电影频道': '影视',
+    '纪录频道': '纪实', '儿童频道': '少儿', '音乐频道': '音乐', '春晚频道': '专题',
+    '地方频道': '地方', '直播中国': '地方', '数字频道': '数字', '解说频道': '体育'
+};
+const LIVE_GROUP_ORDER = ['央视', '卫视', '体育', '影视', '电影', '电视剧', '综艺', '新闻', '纪实', '少儿', '音乐', '文化', '教育', '科教', '财经', '生活', '宗教', '购物', '专题', '数字', '地方', '成人', '其他'];
+// 主页一行显示的分类(其余靠播放页 grid + 分类浏览)
+const LIVE_HOME_GROUPS = new Set(['央视', '卫视', '体育']);
+
+// 🌍 国际频道：iptv-org 按语言的播放列表(每种封顶，控制总量/内存)。lang 从播放列表来，genre 从 group-title。
+const LIVE_LANGS = [
+    { code: 'eng', name: 'English', cap: 150 }, { code: 'spa', name: 'Español', cap: 150 },
+    { code: 'fra', name: 'Français', cap: 150 }, { code: 'deu', name: 'Deutsch', cap: 120 },
+    { code: 'rus', name: 'Русский', cap: 120 }, { code: 'ara', name: 'العربية', cap: 120 },
+    { code: 'por', name: 'Português', cap: 120 }, { code: 'ita', name: 'Italiano', cap: 100 },
+    { code: 'jpn', name: '日本語', cap: 80 }, { code: 'kor', name: '한국어', cap: 80 },
+    { code: 'hin', name: 'हिन्दी', cap: 80 }, { code: 'vie', name: 'Tiếng Việt', cap: 80 }
+];
+const LIVE_LANG_URL = (code) => `https://iptv-org.github.io/iptv/languages/${code}.m3u`;
+// 🔞 成人直播源(可选)：由站长用 LIVE_M3U_ADULT(逗号分隔)注入；归入"成人"分类，受前端 NSFW 过滤开关控制显隐。
+const LIVE_M3U_ADULT = (process.env['LIVE_M3U_ADULT'] || '').split(',').map(s => s.trim()).filter(Boolean);
+
+// iptv-org group-title(英文 genre) → 中文分类
+const LIVE_INTL_GENRE = {
+    general: '综艺', news: '新闻', movies: '电影', movie: '电影', series: '电视剧', drama: '电视剧',
+    music: '音乐', entertainment: '综艺', sports: '体育', sport: '体育', kids: '少儿', animation: '少儿',
+    documentary: '纪实', culture: '文化', education: '教育', science: '科教', business: '财经',
+    religious: '宗教', shop: '购物', lifestyle: '生活', cooking: '生活', travel: '生活', comedy: '综艺',
+    classic: '电影', family: '综艺', outdoor: '生活', auto: '生活', relax: '生活', weather: '其他', legislative: '新闻'
+};
+function liveIntlGenre(groupTitle) {
+    const g = String(groupTitle || '').toLowerCase().split(';')[0].trim();
+    return LIVE_INTL_GENRE[g] || '其他';
+}
+
+// 名称归一(合并/去重 key)：去掉清晰度/HD/台/频道等噪声、空格横杠，大写
+function liveNormName(name) {
+    return String(name || '')
+        .replace(/\((?:\d{3,4}[pi]|[^)]*?)\)/gi, '')   // (1080p)/(720p)/(...)
+        .replace(/\[[^\]]*\]/g, '')                     // [Not 24/7]
+        .replace(/(高清|超清|蓝光|频道|台|HD|FHD|UHD|4K|8K|IPV6|IPV4)/gi, '')
+        .replace(/[\s\-_·｜|]/g, '')
+        .toUpperCase();
+}
+// 展示名清理(去清晰度/方括号噪声，保留中文台名)
+function liveCleanName(name) {
+    return String(name || '').replace(/\s*\((?:\d{3,4}[pi])\)\s*/gi, ' ').replace(/\s*\[[^\]]*\]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function liveHostIsIP(u) { try { return /^\d{1,3}(\.\d{1,3}){3}$/.test(new URL(u).hostname); } catch (e) { return true; } }
+// 线路可达性打分(越小越靠前)。关键：CF Worker 的 fetch() 只允许标准端口(80/443/8080…)，
+// 运营商源多在 :9901/:82 等非标端口 → worker 取不到(403)；裸 IP 也常被封。域名+标准端口才能过。
+const LIVE_STD_PORTS = new Set([80, 443, 8080, 8443, 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8880]);
+function liveSrcRank(u) {
+    try {
+        const url = new URL(u);
+        const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(url.hostname);
+        const https = url.protocol === 'https:';
+        const port = url.port ? parseInt(url.port, 10) : (https ? 443 : 80);
+        const stdPort = LIVE_STD_PORTS.has(port);
+        // 智能路由后的可达性：
+        //   ① 域名 https → rank 0：客户端【直连】(原生 HLS 免 CORS；hls.js 若带 CORS)，不经 worker，端口/CF 限制都绕开。
+        //   ② 域名 http + 标准端口 → rank 1：http 在 https 页是混合内容，必须经 worker 升 https；worker 又只接标准端口。
+        //   ③ 裸 IP / 非标端口 http → rank 10+：worker 取不到 + 直连又是混合内容 → 基本放不了。
+        if (!ip && https) return 0;
+        if (!ip && stdPort) return 1;
+        return 10 + (ip ? 2 : 0) + (stdPort ? 0 : 4) + (https ? 0 : 1);
+    } catch (e) { return 99; }
+}
+// 分类判定：先看名字(跨两个上游更稳)，再回退 group-title 映射
+function liveCategoryOf(name, groupTitle) {
+    const n = String(name || '');
+    if (/CCTV|央视|CGTN/i.test(n)) return /(CCTV-?5($|[^0-9])|5\s*[＋+]|体育|赛事|高尔夫|网球|台球|风云足球|斯诺克)/.test(n) ? '体育' : '央视';
+    if (/卫视/.test(n)) return '卫视';
+    if (/(体育|赛事|足球|篮球|网球|高尔夫|台球|斯诺克|搏击|NBA|ESPN)/i.test(n)) return '体育';
+    if (/(电影|影院|剧场|影视|院线)/.test(n)) return '影视';
+    if (/(少儿|动画|卡通|动漫|儿童|宝贝|金鹰卡通|嘉佳)/.test(n)) return '少儿';
+    if (/(纪录|纪实|探索|科教|地理|discovery)/i.test(n)) return '纪实';
+    if (/(新闻|资讯|凤凰)/.test(n)) return '新闻';
+    if (/(音乐|MTV|演唱)/i.test(n)) return '音乐';
+    return LIVE_GROUP_MAP[groupTitle] || '其他';
+}
+
+function parseM3U(text) {
+    const out = [];
+    const lines = String(text).split(/\r?\n/);
+    let cur = null;
+    for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (line.startsWith('#EXTINF')) {
+            const name = line.includes(',') ? line.slice(line.lastIndexOf(',') + 1).trim() : '';
+            const logo = (line.match(/tvg-logo="([^"]*)"/i) || [])[1] || '';
+            const group = (line.match(/group-title="([^"]*)"/i) || [])[1] || '';
+            const tvgId = (line.match(/tvg-id="([^"]*)"/i) || [])[1] || '';
+            cur = { name, logo, group, tvgId };
+        } else if (line[0] !== '#') {
+            if (cur) { cur.url = line; out.push(cur); cur = null; }
+        }
+    }
+    return out;
+}
+
+// 合并多路上游 → 按归一名去重 → 分类(语言+种类) → 线路域名优先排序。返回 { channels, groups, langs }。
+// 每条上游频道可带 lang(语言显示名)/intl(国际,用 group-title 映射种类)/adult(成人) 标记。
+function buildLiveChannels(lists) {
+    const map = new Map();   // 归一名 → bucket
+    for (const list of lists) {
+        for (const c of (list || [])) {
+            const u = (c.url || '').trim();
+            if (!/^https?:\/\//i.test(u)) continue;   // 浏览器只能播 http(s) m3u8
+            const key = liveNormName(c.name);
+            if (!key) continue;
+            if (/支持作者|更新时间|请刷新|公众号|演示频道|测试频道|^熊猫直播$/.test(c.name)) continue;   // 过滤上游推广/占位条目
+            let b = map.get(key);
+            if (!b) {
+                const adult = !!c.adult;
+                const group = adult ? '成人' : (c.intl ? liveIntlGenre(c.group) : liveCategoryOf(c.name, c.group));
+                b = { name: liveCleanName(c.name) || c.name, group, lang: c.lang || '中文', adult, logo: '', seen: new Set(), sources: [] };
+                map.set(key, b);
+            } else {
+                const cn = liveCleanName(c.name);
+                if (cn && cn.length < b.name.length) b.name = cn;   // 取更短更干净的展示名
+            }
+            // 台标只收 https(挡混合内容 + 恶意上游 data:/追踪像素)
+            if (!b.logo && c.logo && /^https:\/\//i.test(c.logo)) b.logo = c.logo;
+            if (!b.seen.has(u) && b.sources.length < 12) {
+                b.seen.add(u);
+                b.sources.push({ url: u, rank: liveSrcRank(u) });
+            }
+        }
+    }
+    const channels = [];
+    for (const [key, b] of map) {
+        // 线路排序：可达性打分(域名+标准端口 worker 才取得到；运营商非标端口/裸 IP 排最后)
+        b.sources.sort((a, z) => a.rank - z.rank);
+        channels.push({
+            // 保留 '+' —— 否则 "CCTV+1"(归一名 CCTV+1)和 "CCTV1" 去掉加号都成 lv_CCTV1、id 撞车 → 多个频道同时高亮
+            id: 'lv_' + key.replace(/[^a-zA-Z0-9一-龥+]/g, '').slice(0, 40),
+            name: b.name, group: b.group, lang: b.lang, adult: b.adult, logo: b.logo,
+            rank: b.sources.length ? b.sources[0].rank : 99,   // 最优线路可达性(前端把可能能播的排前面)
+            sources: b.sources.slice(0, 8).map(s => ({ url: s.url }))
+        });
+    }
+    const langOrder = ['中文', ...LIVE_LANGS.map(l => l.name)];
+    const li = (l) => { const i = langOrder.indexOf(l); return i < 0 ? 999 : i; };
+    const gi = (g) => { const i = LIVE_GROUP_ORDER.indexOf(g); return i < 0 ? 999 : i; };
+    channels.sort((a, z) => li(a.lang) - li(z.lang) || gi(a.group) - gi(z.group) || a.name.localeCompare(z.name, 'zh'));
+    const groups = LIVE_GROUP_ORDER.filter(g => channels.some(c => c.group === g));
+    const langs = langOrder.filter(l => channels.some(c => c.lang === l));
+    return { channels, groups, langs };
+}
+
+// 实测一条线路能否播：http 走 worker(=客户端播放路径)、https 直连(≈客户端直连)。拿到 #EXTM3U 即活。
+async function probeLiveSource(url) {
+    const https = /^https:\/\//i.test(url);
+    const target = https ? url : (CORS_PROXY_URL ? `${CORS_PROXY_URL}/?url=${encodeURIComponent(url)}` : null);
+    if (!target) return false;   // http 源无 worker 没法验证(也没法播)
+    try {
+        const r = await axios.get(target, { timeout: 8000, maxContentLength: 8000, responseType: 'text', validateStatus: () => true, headers: { 'User-Agent': 'Mozilla/5.0', 'Range': 'bytes=0-5000' } });
+        if (!(r.status === 200 || r.status === 206)) return false;
+        const body = String(r.data || '');
+        if (!body.includes('#EXTM3U')) return false;
+        // 待机/占位/死台不算"能播"(如 catvod 的 backup.m3u8、无信号轮播)——它们返回 200+m3u8 但放不出实际频道
+        if (/backup\.m3u8|backup_\d|无\s*信\s*号|no[\s_-]?signal|maintain|stand.?by|占位|轮播图/i.test(body)) return false;
+        return true;
+    } catch (e) { return false; }
+}
+
+// 后台验证：标 ch.ok(首条线路能否播)，能播的在组内排前。不删频道。原地 mutate channels。
+async function validateLiveChannels(channels) {
+    let i = 0;
+    const CONC = 32;
+    await Promise.all(Array.from({ length: CONC }, async () => {
+        while (i < channels.length) {
+            const ch = channels[i++];
+            let ok = false;
+            for (const s of (ch.sources || []).slice(0, 2)) { if (await probeLiveSource(s.url)) { ok = true; break; } }
+            ch.ok = ok;
+        }
+    }));
+    const langOrder = ['中文', ...LIVE_LANGS.map(l => l.name)];
+    const li = (l) => { const x = langOrder.indexOf(l); return x < 0 ? 999 : x; };
+    const gi = (g) => { const x = LIVE_GROUP_ORDER.indexOf(g); return x < 0 ? 999 : x; };
+    // 语言 → 分类 → 能播优先 → rank → 名称
+    channels.sort((a, z) => li(a.lang) - li(z.lang) || gi(a.group) - gi(z.group) || ((z.ok ? 1 : 0) - (a.ok ? 1 : 0)) || (a.rank - z.rank) || a.name.localeCompare(z.name, 'zh'));
+    return channels;
+}
+
+async function fetchLiveUpstream() {
+    const get = async (urls) => {
+        for (const u of urls) {
+            try {
+                const r = await axios.get(u, { timeout: 12000, responseType: 'text', headers: { 'User-Agent': 'Mozilla/5.0' } });
+                if (r.data && String(r.data).includes('#EXTINF')) return String(r.data);
+            } catch (e) { /* 试下一个 */ }
+        }
+        return '';
+    };
+    // LIVE_M3U_DISABLE=1 时只拉 LIVE_M3U_EXTRA，关掉所有内置上游(vbskycn/iptv-org/国际/内置CCTV5源)
+    const [vbText, orgText, zhoText, ...extraTexts] = await Promise.all([
+        LIVE_BUILTIN ? get([LIVE_M3U_URL, LIVE_M3U_FALLBACK].filter(Boolean)) : Promise.resolve(''),
+        LIVE_BUILTIN ? get([LIVE_M3U_IPTVORG].filter(Boolean)) : Promise.resolve(''),
+        LIVE_BUILTIN ? get([LIVE_M3U_ZHO].filter(Boolean)) : Promise.resolve(''),
+        ...LIVE_M3U_EXTRA.map(u => get([u]))
+    ]);
+    if (!vbText && !orgText && !zhoText && !extraTexts.some(Boolean) && LIVE_BUILTIN) throw new Error('upstream M3U fetch failed');
+    const vbList = parseM3U(vbText), orgList = parseM3U(orgText), zhoList = parseM3U(zhoText);   // 中文(lang 默认中文)；zho 含海外 CDN 华语源
+    const extraLists = extraTexts.map(t => parseM3U(t));           // 用户自定义付费源(LIVE_M3U_EXTRA)优先
+    // 🌍 国际：按语言拉 iptv-org，每种封顶；intl 标记 → 用 group-title 映射种类
+    const langLists = LIVE_BUILTIN ? await Promise.all(LIVE_LANGS.map(async lg => {
+        const t = await get([LIVE_LANG_URL(lg.code)]);
+        return parseM3U(t).slice(0, lg.cap).map(c => ({ ...c, lang: lg.name, intl: true }));
+    })) : [];
+    // 🔞 成人(站长用 LIVE_M3U_ADULT 注入)：归入"成人"分类，受前端 NSFW 过滤控制
+    const adultTexts = await Promise.all(LIVE_M3U_ADULT.map(u => get([u])));
+    const adultList = adultTexts.flatMap(t => parseM3U(t).map(c => ({ ...c, adult: true })));
+    // 内置免费 CCTV5/5+ 放在最前：与上游同名归并时其 https 线路被优先播(LIVE_M3U_DISABLE 时一并关掉)
+    const kafeiList = LIVE_BUILTIN ? LIVE_KAFEI_GEN : [];
+    const built = buildLiveChannels([kafeiList, ...extraLists, vbList, orgList, zhoList, ...langLists, adultList]);
+    const intlN = langLists.reduce((s, l) => s + l.length, 0);
+    console.log(`[直播] 上游拉取：中文 ${vbList.length + orgList.length}${zhoList.length ? '+zho' + zhoList.length : ''}${kafeiList.length ? '+kafei' + kafeiList.length : ''}${LIVE_M3U_EXTRA.length ? '+extra' + extraLists.reduce((s, l) => s + l.length, 0) : ''} + 国际 ${intlN}(${LIVE_LANGS.length}语) + 成人 ${adultList.length} → 合并 ${built.channels.length} 频道 / ${built.groups.length} 类 / ${built.langs.length} 语`);
+    // 后台验证(不阻塞返回)：完成后原地标 ok + 重排，并刷新缓存时间戳让客户端 SWR 取到新版
+    if (LIVE_VALIDATE && CORS_PROXY_URL) {
+        validateLiveChannels(built.channels).then(() => {
+            _liveCache.at = Date.now();
+            console.log(`[直播] 验证完成：${built.channels.filter(c => c.ok).length}/${built.channels.length} 可播`);
+        }).catch(e => console.error('[直播] 验证失败:', e.message));
+    }
+    return built;
+}
+
+// 取直播频道(带 6h 缓存 + 并发合并 + 旧缓存兜底)
+async function getLiveChannels(force = false) {
+    if (!force && _liveCache.ok && (Date.now() - _liveCache.at) < LIVE_CACHE_TTL) return _liveCache.data;
+    if (_liveInflight) return _liveInflight;
+    _liveInflight = (async () => {
+        try {
+            const data = await fetchLiveUpstream();
+            _liveCache = { at: Date.now(), data, ok: true };
+            return data;
+        } catch (e) {
+            console.error('[直播] 刷新失败:', e.message);
+            if (_liveCache.ok) return _liveCache.data;   // 拉取失败时沿用旧缓存
+            _liveCache = { at: Date.now(), data: { channels: [], groups: [], langs: [] }, ok: false };
+            return _liveCache.data;
+        } finally { _liveInflight = null; }
+    })();
+    return _liveInflight;
+}
+
+// 📺 直播频道列表(精选 + 6h 缓存)。前端再本地缓存。
+app.get('/api/live/channels', async (req, res) => {
+    if (!LIVE_TV_ENABLED) return res.json({ enabled: false, channels: [], groups: [], langs: [] });
+    try {
+        const data = await getLiveChannels(false);
+        res.set('Cache-Control', 'public, max-age=1800');   // 客户端/CDN 缓存 30 分钟
+        res.json({ enabled: true, updatedAt: _liveCache.at, count: data.channels.length, channels: data.channels, groups: data.groups, langs: data.langs });
+    } catch (e) {
+        res.json({ enabled: true, channels: [], groups: [], langs: [], error: 'fetch_failed' });
+    }
+});
+
+// 启动后预热缓存(非阻塞)，让首位用户也能秒开直播区
+if (LIVE_TV_ENABLED && !IS_VERCEL) { getLiveChannels(false).catch(() => {}); }
+
 app.get('/api/config', (req, res) => {
     // 检查请求中的 token 是否支持同步
     const userToken = req.query.token || '';
@@ -991,6 +1294,8 @@ app.get('/api/config', (req, res) => {
         danmaku_enabled: !!process.env.DANMU_API_URL,
         // 📮 求片：必须配置 ADMIN_TOKEN(站长才能履行)才开启;否则前端整个隐藏入口、后端拒收
         requests_enabled: !!process.env.ADMIN_TOKEN,
+        // 📺 直播(IPTV)：默认开启，设 LIVE_TV_DISABLED=1 关闭 → 前端隐藏直播区
+        live_enabled: LIVE_TV_ENABLED,
         // 🚫 封禁：站长在后台封了这个用户 → 前端锁屏
         banned: isBanned(userToken)
     });
@@ -1090,13 +1395,11 @@ app.post('/api/history/push', (req, res) => {
             if (!(tomb.get(d.id) >= at)) tomb.set(d.id, at);
         }
 
-        // 计算需要删除的 ID（服务器有但本地没推上来的，单设备删除路径）
-        const existingIds = cacheManager.db.prepare('SELECT item_id FROM user_history WHERE user_token = ?').all(token).map(row => row.item_id);
-        const pushingIds = new Set(history.map(item => item.id));
-        const idsToDelete = existingIds.filter(id => !pushingIds.has(id));
+        // 取每条现有的 updated_at，用于"更新者胜"——防陈旧设备用旧进度覆盖服务器上更新的进度
+        const existingUpd = new Map(cacheManager.db.prepare('SELECT item_id, updated_at FROM user_history WHERE user_token = ?').all(token).map(row => [row.item_id, row.updated_at]));
         const PRUNE_MS = 120 * 24 * 60 * 60 * 1000;  // 墓碑保留 120 天，过期剪枝避免无限增长
 
-        let saved = 0, deletedCount = 0;
+        let saved = 0;
         const transaction = cacheManager.db.transaction(() => {
             // 1. 插入历史，但被【更新的删除墓碑】压制的不入库(防复活)；若该条比墓碑更新=重新观看,清墓碑后入库
             for (const item of history) {
@@ -1105,11 +1408,21 @@ app.post('/api/history/push', (req, res) => {
                 const td = tomb.get(item.id);
                 if (td != null && td >= upd) { deleteHist.run(token, item.id); continue; }  // 删除比这次观看新 → 压制
                 if (td != null) tomb.delete(item.id);  // 这次观看更新 → 重新观看,墓碑作废
+                // ⏱️ 更新者胜(last-writer-wins)：服务器已有更新的版本(别的设备看到了更靠后的集/进度) → 不被旧推送覆盖。
+                //    根治"iPad 看到16集、手机却把进度压回14集"——陈旧设备的旧 updated_at 推送不再 INSERT OR REPLACE 掉新数据。
+                const cur = existingUpd.get(item.id);
+                if (cur != null && cur > upd) continue;
                 insertStmt.run(token, item.id, JSON.stringify(item.data), upd);
                 saved++;
             }
-            // 2. 单设备删除：服务器有、推送里没有的，删掉(沿用旧行为,不打墓碑以免误伤未同步设备)
-            for (const id of idsToDelete) { deleteHist.run(token, id); deletedCount++; }
+            // 2. 墓碑驱动删除（替代危险的"服务器有、推送里没有就删"隐式删除——那会在多设备/本地条数上限不一致
+            //    (本地50 vs 服务器50)/配额降级时，把别的设备刚加/刚续看的剧误删，是经典多端同步反模式）。
+            //    现在只删【显式打了墓碑】的项(removeFromHistory/clearWatchHistory 都打墓碑)：墓碑不早于服务器版本才删，
+            //    re-watch(td<upd, 步骤1已 tomb.delete)的不在此列、别的设备没墓碑的剧一律不动。
+            for (const [id, at] of tomb) {
+                const cur = existingUpd.get(id);
+                if (cur != null && cur <= at) deleteHist.run(token, id);
+            }
             // 3. 持久化墓碑(剪枝过期)
             cacheManager.db.prepare('DELETE FROM user_history_deleted WHERE user_token = ?').run(token);
             const cutoff = Date.now() - PRUNE_MS;
@@ -1117,7 +1430,7 @@ app.post('/api/history/push', (req, res) => {
         });
         transaction();
 
-        res.json({ sync_enabled: true, saved: saved, deleted: deletedCount });
+        res.json({ sync_enabled: true, saved: saved, deleted: 0 });
     } catch (e) {
         console.error('[History Push Error]', e.message);
         res.status(500).json({ error: 'Database error' });
@@ -1677,23 +1990,219 @@ function dandanToDplayer(comments) {
     }
     return out;
 }
+function danmakuCn2Num(t) {
+    // 中文数字/阿拉伯数字 → int("一/十二/二十三/一百零五"，集数场景到几百足够)
+    t = String(t || '');
+    if (/^\d+$/.test(t)) return parseInt(t, 10);
+    const D = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    let n = 0, cur = 0, any = false;
+    for (const ch of t) {
+        if (D[ch] != null) { cur = D[ch]; any = true; }
+        else if (ch === '十') { n += (cur || 1) * 10; cur = 0; any = true; }
+        else if (ch === '百') { n += (cur || 1) * 100; cur = 0; any = true; }
+        else return null;
+    }
+    return any ? n + cur : null;
+}
 function danmakuEpNum(s) {
-    // 优先取"第N集/话/期"里的 N(忽略"破事精英2第17集"里的剧名数字2)；取不到再退回第一个数字
-    const m = String(s || '').match(/第\s*0*(\d+)\s*[集话話期]/);
+    // 优先取"第N集/话/期"里的 N(支持中文数字"第一集"；忽略"破事精英2第17集"里的剧名数字2)；取不到再退回第一个数字
+    const str = String(s || '');
+    let m = str.match(/第\s*0*(\d+)\s*[集话話期]/);
     if (m) return parseInt(m[1], 10);
-    const m2 = String(s || '').match(/\d+/);
+    m = str.match(/第\s*([一二两三四五六七八九十百零]+)\s*[集话話期]/);
+    if (m) { const n = danmakuCn2Num(m[1]); if (n != null) return n; }
+    const m2 = str.match(/\d+/);
     return m2 ? parseInt(m2[0], 10) : null;
 }
-function pickDanmakuEpisode(episodes, epName) {
-    if (!episodes || !episodes.length) return null;
-    const n = epName ? danmakuEpNum(epName) : null;
-    if (n != null) {
-        const byTitle = episodes.find(e => danmakuEpNum(e.episodeTitle) === n);
-        if (byTitle) return byTitle;
-        if (n >= 1 && n <= episodes.length) return episodes[n - 1];
-        return null;  // 集号超出弹幕源集数(资源站比弹幕源多集，如番外/彩蛋/预告) → 返回空，别错放第1集弹幕
+// 集名先剥离【同内容标签】(语言/画质/权益标注，不改变内容本体)——"第24集(会员版)"就是第24集、"第10期 中字"就是第10期，
+//   拉丁标签(HD/BD/1080P/HDR…)要求【词边界】且允许连写，防误剥 BTS/HDTV/CATCH；剥后残留仅剩数字(+版/帧)且【确实剥过标签】视同全标签(电影 "BD1280高清";裸集号 02/03 不清)。
+const DANMAKU_LABEL_LATIN = /(?<![A-Za-z0-9])(?:HDR|HD|BD|TC|TS|HC|UHD|SD|DVD|WEB-?DL|WEBRip|BluRay|REMUX|\d{3,4}[Pp]|[48][Kk])+(?![A-Za-z])/gi;
+const DANMAKU_LABEL_CN = /(中文字幕|中字|双字|双语|国语|粤语|台配|日语|韩语|英语|无水印|完整版|会员加长版|加长版|未删减|超清|高清|蓝光|标清|修复版|导演剪辑版|杜比视界|会员版|超前点播|超前版|抢先版|点映版|点映|VIP版?)/g;
+function danmakuCleanEpName(s) {
+    const orig = String(s || '');
+    let r = orig.replace(DANMAKU_LABEL_LATIN, '').replace(DANMAKU_LABEL_CN, '');
+    if (r !== orig && !/[集话話期]/.test(r) && /^[\s·]*\d{2,4}[\s·]*(?:版|帧|周年?)?[\s·]*$/.test(r)) r = '';
+    return r;
+}
+// 变体词(正片的不同剪辑/子场,时间轴不同 → 须精确匹配,不回落正片)；额外内容(与正片时间轴完全无关 → 只配同类)。
+//   刻意【不含】会员/超前/抢先(会员版/超前点播/抢先版是标签,已由 DANMAKU_LABEL_CN 剥掉;裸"会员福利"是看点)、
+//   【不含】幕后/反应(连锁反应/幕后玩家是真实片名/剧名,极易误判)——对抗审查三轮抓出的高频误伤词。
+const DM_VARIANT = '纯享|加更|特辑|发布会|见面会|专场|访谈|饭局|plus';
+const DM_EXTRA = '先导|预告|彩蛋|花絮|片花|直拍|reaction|repo';
+const DM_VAR_RE = new RegExp('^(?:' + DM_VARIANT + ')', 'i');
+const DM_EXTRA_RE = new RegExp('^(?:' + DM_EXTRA + ')', 'i');
+const DM_TOK_VAR = new RegExp('^(?:' + DM_VARIANT + ')$', 'i');
+// 额外内容【标签形态】：可选短前缀(独家/幕后/正片…) + 额外词 + 可选后缀(片/版/集锦…)。用于识别 "独家花絮"/"第5集独家花絮"/"预告片",
+//   但不误判 "末日预告"/"连锁反应"(内容词+关键词,前缀不在白名单)。
+const DM_EXTRA_LABEL = new RegExp('^(?:独家|幕后|正片|精彩|完整|删减|未播|拍摄|花絮|片花)?(?:' + DM_EXTRA + ')(?:片|版|集锦|合集|篇|特辑)?$', 'i');
+const dmExtraKw = str => { const km = String(str).match(new RegExp('(?:' + DM_EXTRA + ')', 'i')); return km ? km[0].toLowerCase() : ''; };
+const DM_SEP = /[\s:：,，、;；。•‧＆&|/·\-—~～!！?？()（）【】\[\]「」『』"']/;
+// 🎪 集名 → { num, date, split, variant, extra, extraKw, bare, residual }。
+//   **关键(对抗审查三轮的核心)**:标记(上中下/纯享/预告/幕后…)只从【结构位置】认——紧贴集号/期号 token(glued)或独立成 token(分隔围起的纯标记),
+//   绝不从自由文本副标题里扫。所以"第6集 幕后黑手"/"第5期 聊聊人生"/"幕后玩家"(电影) 的关键词都是内容,不当额外/变体 → 照常按集号/正片匹配,不丢弹幕。
+function danmakuMarkers(s) {
+    const raw = danmakuCleanEpName(s);
+    const isDrama = /第\s*(?:\d+|[一二两三四五六七八九十百零]+)\s*[集话話]/.test(raw);
+    const mdOk = (mm, dd) => +mm >= 1 && +mm <= 12 && +dd >= 1 && +dd <= 31;
+    const pad = v => String(v).padStart(2, '0');
+    let date = null, tokEnd = -1, m;
+    if (isDrama) { const um = raw.match(/第\s*(?:\d+|[一二两三四五六七八九十百零]+)\s*[集话話]/); tokEnd = um.index + um[0].length; }
+    else {
+        if ((m = raw.match(/(?:^|\D)(\d{4})(\d{2})(\d{2})(?=\D|$)/)) && mdOk(m[2], m[3])) { date = m[1] + m[2] + m[3]; tokEnd = m.index + m[0].length; }
+        else if ((m = raw.match(/(?:^|\D)(\d{2})(\d{2})(\d{2})(?=\D|$)/)) && mdOk(m[2], m[3])) { date = m[1] + m[2] + m[3]; tokEnd = m.index + m[0].length; }
+        else if ((m = raw.match(/(\d{4})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})/)) && mdOk(m[2], m[3])) { date = m[1] + pad(m[2]) + pad(m[3]); tokEnd = m.index + m[0].length; }
+        else if ((m = raw.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日?/)) && mdOk(m[1], m[2])) { date = pad(m[1]) + pad(m[2]); tokEnd = m.index + m[0].length; }
+        else if ((m = raw.match(/(?:^|\D)(\d{2})(\d{2})\s*期/)) && mdOk(m[1], m[2])) { date = m[1] + m[2]; tokEnd = m.index + m[0].length; }
+        const qi = raw.match(/第?\s*(?:\d{1,8}|[一二两三四五六七八九十百零]+)\s*期/);
+        if (qi) tokEnd = Math.max(tokEnd, qi.index + qi[0].length);   // 期与日期并存(第5期20260101)取靠后者,别把日期当 residual
     }
-    return episodes[0];  // 无集号(电影等)取第一个
+    // 合集/连播条目(第1-2集 / 第2、3集 / 第1-2期)：时间轴=两集拼接,绝不能被单集号命中(错配)。num 置空 → 只能靠 ①a 原文全等(归一保留连字符)匹配同款合集。
+    // 合集范围:两侧集/期号≤3位(4位是年份,"2026-01期"是月刊不是合集,别误判)
+    const isRange = /(?<!\d)(?:\d{1,3}|[一二两三四五六七八九十百零]+)\s*[-—~～、,，]\s*(?:\d{1,3}|[一二两三四五六七八九十百零]+)\s*[集话話期]/.test(raw);
+    const num = isRange ? null : danmakuEpNum(raw);
+    let split = '', variant = '', extra = false, extraKw = '', residual = false;
+    if (tokEnd >= 0) {
+        // 有 num/date/期/集 token：① glued run(token 紧贴其后到首分隔符,逐段剥前导标记) ② 独立 token(纯标记才认,否则 residual)
+        const after = raw.slice(tokEnd), sepIdx = after.search(DM_SEP);
+        let g = sepIdx < 0 ? after : after.slice(0, sepIdx);
+        for (; g;) {
+            if ((m = g.match(DM_VAR_RE))) { variant += m[0].toLowerCase(); g = g.slice(m[0].length); continue; }
+            if ((m = g.match(DM_EXTRA_RE))) { extra = true; extraKw += m[0].toLowerCase(); g = g.slice(m[0].length); continue; }
+            if ((m = g.match(/^([上中下])(?=$|[上中下]|[^一-龥])/))) { split += m[1]; g = g.slice(1); continue; }
+            break;
+        }
+        const toks = ((g ? g + ' ' : '') + (sepIdx < 0 ? '' : after.slice(sepIdx))).split(DM_SEP).map(t => t.trim()).filter(Boolean);
+        for (const tok of toks) {
+            const core = tok.replace(/[集部篇赛场]+$/, '');
+            if (/^[上中下]+$/.test(core)) split += core;
+            else if (DM_TOK_VAR.test(core)) variant += core.toLowerCase();
+            else if (DM_EXTRA_LABEL.test(tok) || DM_EXTRA_LABEL.test(core)) { extra = true; extraKw += dmExtraKw(tok); }   // "独家花絮"/"预告片" 等标签形态也认(修 第5集独家花絮 被当正片)
+            else residual = true;
+        }
+    } else {
+        // 无 num/date/期/集 token：纯 上集/下集(→split)、纯变体(→variant)、【标签形态】的额外内容(→extra)。
+        //   额外只认"预告片/独家花絮/幕后花絮/花絮/彩蛋合集"这类【(可选短前缀)+额外词+(可选 片/版/集锦)】,
+        //   绝不把"末日预告/终极预告/连锁反应"这种正常片名(内容词+关键词结尾)误判(对抗审查抓出的电影丢弹幕)。
+        const w = raw.replace(/[集部篇赛场]+$/, '');
+        if (/^[上中下]+$/.test(w)) split = w;
+        else if (DM_TOK_VAR.test(w)) variant = w.toLowerCase();
+        else if (DM_EXTRA_LABEL.test(raw) || DM_EXTRA_LABEL.test(w)) { extra = true; extraKw = dmExtraKw(raw); }
+    }
+    const bare = tokEnd >= 0 && !split && !variant && !extra && !residual;
+    return { num, date, split, variant, extra, extraKw, bare, residual, range: isRange };
+}
+// 归一集名：去空格/括号/标点(小写)。数字间的连字符保留——"第1-2集"(合集)不能归一成"第12集"(对抗审查抓出的假命中)
+function danmakuNormEp(s) { return String(s || '').replace(/[-—_](?!\d)|(?<!\d)[-—_]|[\s()（）\[\]【】·:：~～!！?？"'「」『』]/g, '').toLowerCase(); }
+function danmakuDateEq(a, b) { return !!a && !!b && (a === b || a.endsWith(b) || b.endsWith(a)); }
+function danmakuSufEq(a, b) { return a === b || (!!a && !!b && (a.includes(b) || b.includes(a))); }
+// episodes: [{episodeId,episodeTitle}]。epName=资源站集名。preferYear='2026'(可选,跨年同月日消歧)。
+function pickDanmakuEpisode(episodes, epName, preferYear) {
+    if (!episodes || !episodes.length) return null;
+    const rawNorm = danmakuNormEp(epName || '');
+    const cleaned = danmakuCleanEpName(epName || '').trim();
+    const parts = episodes.map(e => ({ e, m: danmakuMarkers(e.episodeTitle), raw: danmakuNormEp(e.episodeTitle), n: danmakuNormEp(danmakuCleanEpName(e.episodeTitle)) }));
+    // ①a 原文归一全等(不剥标签)：'第8期'配'第8期'不配'第8期会员版'；双语电影'粤语'配'粤语'不配'国语'
+    let hit = rawNorm && parts.find(x => x.raw === rawNorm);
+    if (hit) return hit.e;
+    // ①b 剥标签后归一全等：跨写法('第10期(下)'↔'第10期下')、剥标签后同名
+    const wn = danmakuNormEp(cleaned);
+    hit = wn && parts.find(x => x.n && x.n === wn);
+    if (hit) return hit.e;
+    const want = danmakuMarkers(epName);
+    want._norm = wn;   // 供 danmakuMoviePick 对多影片捆绑做模糊命中
+    if (!epName || !cleaned) return danmakuMoviePick(parts, want);
+    if (want.num == null && want.date == null) {
+        if (want.split && !want.variant && !want.extra && !want.residual) {   // 纯"上集/下集/中集"→ 序数映射到正片
+            const mains = parts.filter(x => !x.m.extra), bs = mains.find(x => x.m.split === want.split);
+            if (bs) return bs.e;
+            if (want.split === '中') return mains.length === 3 ? mains[1].e : null;
+            if (mains.length >= 2 && mains.length <= 3) return want.split === '上' ? mains[0].e : mains[mains.length - 1].e;
+            return null;
+        }
+        return danmakuMoviePick(parts, want);   // 电影/无结构
+    }
+    // 同号/同期候选池里按 变体/拆分/额外 挑
+    const pick = (pool) => {
+        const nonExtra = pool.filter(x => !x.m.extra), extras = pool.filter(x => x.m.extra);
+        if (want.extra) {   // 我方是额外内容：只在额外条目里按子类型(花絮/预告/彩蛋)配
+            if (!extras.length) return null;
+            const same = extras.find(x => x.m.extraKw && want.extraKw && danmakuSufEq(want.extraKw, x.m.extraKw));
+            if (same) return same.e;
+            return (extras.length === 1 && !want.extraKw) ? extras[0].e : null;
+        }
+        if (want.variant) {   // 我方是变体(纯享/特辑…)：须同变体(精确/包含),缺则 null(绝不回落正片,时间轴不同)
+            let h = nonExtra.find(x => x.m.variant === want.variant && x.m.split === want.split);
+            if (h) return h.e;
+            const compat = nonExtra.filter(x => x.m.variant && danmakuSufEq(want.variant, x.m.variant) && x.m.split === want.split);
+            if (compat.length) { compat.sort((a, b) => b.m.variant.length - a.m.variant.length); return compat[0].e; }
+            return null;
+        }
+        const bareSrc = nonExtra.find(x => x.m.bare);   // 源里【干净整集】条目(无拆分/变体/副标题) → 回落只认它,不认 上期回顾/下期精选 这种带副标题的异内容
+        if (want.split) {   // 我方是 上/中/下 拆分
+            const h = nonExtra.find(x => x.m.split === want.split && !x.m.variant);
+            if (h) return h.e;
+            if (nonExtra.some(x => x.m.split && !x.m.variant)) return null;   // 源本身按上中下拆分,但没我方这半 → 宁可没有
+            // 源没拆分只有干净整集:仅"上"(与整集开头对齐)回落整集;"中/下"整集弹幕会整体前移半集偏移 → 宁可没有不错配
+            return (want.split === '上' && bareSrc) ? bareSrc.e : null;
+        }
+        // 我方无标记：优先干净整集 → 同号唯一非拆分条目(可能带看点副标题,同集) → 纯期号(bare)时容忍源的 上/中/下 拆分取上
+        if (bareSrc) return bareSrc.e;
+        const plainish = nonExtra.filter(x => !x.m.split && !x.m.variant);
+        if (plainish.length === 1) return plainish[0].e;
+        if (want.bare) { const sp = nonExtra.filter(x => x.m.split && !x.m.variant); if (sp.length) { sp.sort((a, b) => '上中下'.indexOf(a.m.split[0]) - '上中下'.indexOf(b.m.split[0])); return sp[0].e; } }
+        return null;
+    };
+    // ② 日期式期号(综艺)：同月日跨年 → 优先 preferYear、否则取最新一年；日期配不上【不终结】继续走 ③
+    if (want.date) {
+        let sd = parts.filter(x => danmakuDateEq(want.date, x.m.date));
+        if (sd.length) {
+            const py = String(preferYear || ''), yy = py.slice(2);
+            const byYear = py ? sd.filter(x => (x.m.date.length >= 8 && x.m.date.startsWith(py)) || (x.m.date.length === 6 && yy && x.m.date.startsWith(yy))) : [];
+            if (byYear.length) sd = byYear;
+            else { sd.sort((a, b) => (b.m.date.length - a.m.date.length) || b.m.date.localeCompare(a.m.date)); const latest = sd[0].m.date; sd = sd.filter(x => x.m.date === latest); }
+            const r = pick(sd);
+            if (r) return r;
+            if (want.split || want.variant || want.extra) return null;
+        }
+    }
+    // ③ 数字期/集号
+    if (want.num != null) {
+        const r = pick(parts.filter(x => x.m.num === want.num && !x.m.date));
+        if (r) return r;
+        if (want.split || want.variant || want.extra) return null;
+        // 索引兜底：纯数字/第N集话/EP 且弹幕源集标题全无数字/日期,按序取第 N 个(目标位非额外内容)
+        const numericSelf = (/[集话話]/.test(cleaned) || /^\s*(?:ep\.?\s*)?0*\d+\s*$/i.test(cleaned)) && !/期/.test(cleaned);
+        if (numericSelf && !parts.some(x => x.m.num != null || x.m.date || x.m.range)) {
+            // 按序取第 N 个,但索引到【剔除额外条目后】的数组(修:源开头挂预告片时 parts[n-1] 整体错位一集)
+            const mains = parts.filter(x => !x.m.extra);
+            if (want.num >= 1 && want.num <= mains.length) return mains[want.num - 1].e;
+        }
+        return null;
+    }
+    return danmakuMoviePick(parts, want);
+}
+// 电影/无集号兜底：我方额外内容→只配同子类型;否则 认准"正片"→唯一非额外条目→单条目。参数 parts 已含 marker。
+function danmakuMoviePick(parts, want) {
+    if (want && want.extra) {
+        const extras = parts.filter(x => x.m.extra);
+        if (!extras.length) return null;
+        const same = extras.find(x => x.m.extraKw && want.extraKw && danmakuSufEq(want.extraKw, x.m.extraKw));
+        if (same) return same.e;
+        return (extras.length === 1 && !want.extraKw) ? extras[0].e : null;
+    }
+    const mains = parts.filter(x => !x.m.extra);
+    const zheng = mains.find(x => /正片/.test(String(x.e.episodeTitle || '')));
+    if (zheng) return zheng.e;
+    if (mains.length === 1) return mains[0].e;
+    if (mains.length > 1) {
+        // 多条:先按 epName 模糊命中(不同影片被 danmu_api 捆在一个 anime 时,认准我方那部)
+        const wn = want && want._norm;
+        if (wn && wn.length >= 2) { const fz = mains.find(x => x.n && (x.n.includes(wn) || wn.includes(x.n))); if (fz) return fz.e; }
+        // 剥标签后都为空/彼此相同 → 同片的版本(国语/粤语/画质,时间轴一致)取任一;否则是不同影片 → 宁可没有不错配
+        const names = mains.map(x => danmakuCleanEpName(x.e.episodeTitle).trim());
+        return names.every(n => !n || n === names[0]) ? mains[0].e : null;
+    }
+    return null;   // 源全是额外条目(预告/花絮),我方要正片 → 宁可没有(不拿预告弹幕铺正片)
 }
 // 从【一个 danmu_api 实例】取某剧某集弹幕：搜索 → 同剧多平台(iqiyi/360/...)回退 → 返回 DPlayer 数组(空=该实例没取到)
 async function fetchDanmakuFromInstance(base, token, title, ep) {
@@ -1721,15 +2230,32 @@ async function fetchDanmakuFromInstance(base, token, title, ep) {
         if (danmakuSearchCache.size >= 500) { const k = danmakuSearchCache.keys().next().value; if (k !== undefined) danmakuSearchCache.delete(k); }
         danmakuSearchCache.set(skey, { animes, expiry: Date.now() + DANMAKU_SEARCH_TTL });
     }
+    // 季号解析成数字：认"第N季/Season N/SN" + 剧名尾部裸数字("庆余年2"/"斗破苍穹4",排除 19xx/20xx 年份)。"第2季"="第二季"=Season2=S2。
+    const yearM = String(title).match(/(?:19|20)\d{2}/);
+    const seasonOf = s => { s = String(s || ''); const m = s.match(/第\s*([0-9一二两三四五六七八九十]+)\s*季|season\s*0*(\d+)|\bS0*(\d{1,2})\b/i); if (m) return danmakuCn2Num(m[1] || m[2] || m[3]); const t = s.match(/(?<![0-9])([2-9]|1[0-9])\s*$/); return t ? parseInt(t[1], 10) : null; };
+    const wantSeason = seasonOf(title);
+    // 尾裸数字季号(庆余年2)去掉后用于包含匹配——否则弹幕源的"庆余年 第二季"(核心名不含"2")进不了候选,只剩第一季页 → 整季错配。
+    const ctBase = wantSeason != null ? ct.replace(/([2-9]|1\d)$/, '') : ct;
     let candidates = animes.filter(a => core(a.animeTitle) === ct);
     if (!candidates.length) candidates = animes.filter(a => norm(a.animeTitle) === nt);
-    if (!candidates.length) candidates = animes.filter(a => core(a.animeTitle).includes(ct) || ct.includes(core(a.animeTitle)));
-    if (!candidates.length && animes.length) candidates = [animes[0]];
+    if (!candidates.length) candidates = animes.filter(a => { const c = core(a.animeTitle); return c.includes(ct) || ct.includes(c) || (ctBase !== ct && ctBase && c.includes(ctBase)); });
+    // 零包含兜底：不再盲取 animes[0](可能是无关剧,对抗审查抓出的错剧弹幕)。仅当唯一搜索结果、或该结果核心名与剧名有交集时才用。
+    if (!candidates.length && animes.length === 1 && (core(animes[0].animeTitle).includes(ct) || ct.includes(core(animes[0].animeTitle)))) candidates = [animes[0]];
+    // 🗓️ 年份偏好：剧名带年份(2026)优先同年候选。
+    if (candidates.length > 1 && yearM) { const withYear = candidates.filter(a => String(a.animeTitle || '').includes(yearM[0])); if (withYear.length) candidates = withYear; }
+    // 🗓️ 季号/续集号(第N季 或 尾裸数字如"庆余年2"/"速度与激情9")：先取精确同季；没有精确同季时,
+    //    多候选下【剔除裸基名(第一部/第一季)和季号明确不同的】——它们是不同作品,宁可没弹幕不错配(修跨季/电影续集串弹幕)。
+    if (wantSeason != null && candidates.length) {
+        const exact = candidates.filter(a => seasonOf(a.animeTitle) === wantSeason);
+        if (exact.length) candidates = exact;
+        else if (candidates.length > 1) candidates = candidates.filter(a => { const s = seasonOf(a.animeTitle); return (s == null || s === wantSeason) && core(a.animeTitle) !== ctBase; });
+    }
     const platOf = s => { const m = String(s || '').match(/from\s+([a-z0-9]+)/i); return m ? m[1].toLowerCase() : ''; };
     const PLAT_RANK = { iqiyi: 0, qq: 1, tencent: 1, youku: 2, bilibili: 3, mango: 4, imgo: 4, '360': 5, migu: 9 };
     candidates.sort((a, b) => (PLAT_RANK[platOf(a.animeTitle)] ?? 6) - (PLAT_RANK[platOf(b.animeTitle)] ?? 6));
+    const preferYear = yearM ? yearM[0] : null;   // 跨年同月日消歧(回看旧季不误取新季)
     for (let tries = 0; tries < candidates.length && tries < 3; tries++) {
-        const episode = pickDanmakuEpisode(candidates[tries].episodes, ep);
+        const episode = pickDanmakuEpisode(candidates[tries].episodes, ep, preferYear);
         if (!episode || !episode.episodeId) continue;
         const _c0 = Date.now();
         try {
